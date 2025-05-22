@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.98"
-clap = "4.5.38"
+clap = { version = "4.5.38", features = ["derive"] }
 colored_json = "5.0.0"
 human_format = "1.1.0"
 ratatui = "0.29.0"

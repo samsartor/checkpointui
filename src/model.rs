@@ -1,4 +1,4 @@
-use anyhow::{Error, Result};
+use anyhow::Result;
 use safetensors::tensor::{TensorInfo, Metadata, SafeTensorError};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone)]
 pub enum Key {
     Name(String),
     Index(u64),
@@ -21,6 +21,7 @@ impl fmt::Display for Key {
     }
 }
 
+#[derive(Default)]
 pub struct ModuleInfo {
     pub full_name: String,
     pub tensor_info: Option<TensorInfo>,
@@ -112,7 +113,8 @@ fn flatten_single_child_chains(mut module: ModuleInfo) -> ModuleInfo {
     }
     
     while module.children.len() == 1 && module.tensor_info.is_none() {
-        let (key, child) = module.children.into_iter().next().unwrap();
+        let children = std::mem::take(&mut module.children);
+        let (key, child) = children.into_iter().next().unwrap();
         if child.children.is_empty() {
             module.children.insert(key, child);
             break;
