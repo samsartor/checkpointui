@@ -1,0 +1,13 @@
+This is a Rust TUI for inspecting safetensors files.
+It supports an interactive tree where the arrow keys can move up and down the list of modules, or into a module to see its children.
+
+Here are some further design requirements:
+- the top bar of the TUI should show the file path and the path of the current working module tree
+- like lssafetensors, each child in the tree should show its total params if a module or tensor info if it is a tensor
+- modules should have a "▶" to indicate the user can go into their trees
+- if a user presses right arrow on a module, they go into it
+- if a user presses space on a module, it expands to "▼" and shows its children without changing the current working module (acts as a toggle)
+- if a user presses left arrow, the current working module goes up a level
+- if a module "foo" has only one child "bar" with children "a" and "b",  the tree for "model.foo" should show "bar.a" and "bar.b" directly, so the user does not need to left-arrow multiple times
+- the bottom bar should show some general statistics such as the total number of params and the total params in the current module
+- the module tree should take up the left half of the tui. the right half should be an info panel. for now the info panel should show be a scrollable display of the safetensors file metadata, but later might try to visualize tensors when selected
