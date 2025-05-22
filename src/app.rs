@@ -8,9 +8,12 @@ use ratatui::crossterm::terminal::{
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Margin},
     style::{Color, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget},
+    widgets::{
+        Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, StatefulWidget,
+    },
 };
 use std::collections::HashSet;
 use std::io::{Stdout, stdout};
@@ -72,12 +75,12 @@ impl TreeState {
 
     fn rebuild_visible_items(&mut self) {
         self.visible_items.clear();
-        
+
         // Navigate to current module
         let mut current_module = self.data.clone();
         for key in &self.current_path {
-            if let Some(child) = current_module.children.get(key) {
-                current_module = ArcRef::new(current_module).map(|m| &m.children[key]);
+            if current_module.children.contains_key(key) {
+                current_module = current_module.map(|m| &m.children[key]);
             } else {
                 // Path no longer exists, reset to root
                 self.current_path.clear();
@@ -85,13 +88,13 @@ impl TreeState {
                 break;
             }
         }
-        
+
         self.build_visible_items(current_module, self.current_path.clone(), 0);
 
         if self.selected_index >= self.visible_items.len() {
             self.selected_index = self.visible_items.len().saturating_sub(1);
         }
-        
+
         self.list_state.select(Some(self.selected_index));
         self.scroll_state = ScrollbarState::new(self.visible_items.len().saturating_sub(1));
     }
@@ -145,7 +148,7 @@ impl TreeState {
             self.scroll_state = self.scroll_state.position(self.selected_index);
         }
     }
-    
+
     fn move_right(&mut self) {
         if let Some(item) = self.visible_items.get(self.selected_index) {
             if item.has_children() {
@@ -156,7 +159,7 @@ impl TreeState {
             }
         }
     }
-    
+
     fn move_left(&mut self) {
         if !self.current_path.is_empty() {
             // Navigate up to parent module
@@ -213,7 +216,7 @@ impl App {
         Ok(())
     }
 
-    fn render_ui(&self, f: &mut ratatui::Frame) {
+    fn render_ui(&mut self, f: &mut ratatui::Frame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -246,6 +249,7 @@ impl App {
                 .split(chunks[1]);
 
             self.render_tree_panel(f, main_chunks[0]);
+            self.render_scrollbar(f, main_chunks[0]);
             self.render_info_panel(f, main_chunks[1]);
         } else {
             let help_text = "No file loaded.\n\nUsage: checkpointui <safetensors_file>\n\nPress 'q' or Esc to quit";
@@ -269,12 +273,13 @@ impl App {
     }
 
     fn render_tree_panel(&mut self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        let Some(tree) = &mut self.tree_state else { return };
+        let Some(tree) = &mut self.tree_state else {
+            return;
+        };
         let items: Vec<ListItem> = tree
             .visible_items
             .iter()
-            .enumerate()
-            .map(|(i, item)| {
+            .map(|item| {
                 let indent = "  ".repeat(item.depth);
                 let icon = if item.has_children() {
                     if item.is_expanded { "▼ " } else { "▶ " }
@@ -284,12 +289,6 @@ impl App {
                     "  "
                 };
 
-                let style = if i == tree.selected_index {
-                    Style::default().bg(Color::Blue).fg(Color::White)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-
                 let text = format!(
                     "{}{}{} ({})",
                     indent,
@@ -297,18 +296,26 @@ impl App {
                     item.name,
                     human_format::Formatter::new().format(item.info.total_params as f64)
                 );
-                ListItem::new(text).style(style)
+                ListItem::new(text)
             })
             .collect();
 
         let current_path_str = if tree.current_path.is_empty() {
             "Root".to_string()
         } else {
-            tree.current_path.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(".")
+            tree.current_path
+                .iter()
+                .map(|k| k.to_string())
+                .collect::<Vec<_>>()
+                .join(".")
         };
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(format!("Module Tree - {}", current_path_str)))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Module Tree - {}", current_path_str)),
+            )
             .style(Style::default().fg(Color::White))
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
 
@@ -349,6 +356,23 @@ impl App {
             .style(Style::default().fg(Color::White));
 
         f.render_widget(info, area);
+    }
+
+    fn render_scrollbar(&mut self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let Some(tree) = &mut self.tree_state else {
+            return;
+        };
+        f.render_stateful_widget(
+            Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None),
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut tree.scroll_state,
+        );
     }
 }
 
