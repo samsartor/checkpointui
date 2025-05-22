@@ -1,24 +1,29 @@
 use anyhow::{Result, bail};
-use safetensors::tensor::{Metadata, SafeTensorError, TensorInfo};
+use safetensors::tensor::{SafeTensorError, TensorInfo};
 use std::collections::{BTreeMap, HashMap};
-use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::{fmt, mem};
 
 const HEADER_MIB_LIMIT: usize = 100;
+pub type Metadata = safetensors::tensor::Metadata;
 
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone)]
+#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Hash)]
 pub enum Key {
     Name(String),
     Index(u64),
+    Cons(Box<Key>, Box<Key>),
 }
+
+impl Key {}
 
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Key::Name(n) => fmt::Display::fmt(n, f),
             Key::Index(i) => fmt::Display::fmt(i, f),
+            Key::Cons(a, b) => write!(f, "{}.{}", a, b),
         }
     }
 }
@@ -28,7 +33,8 @@ pub struct ModuleInfo {
     pub full_name: String,
     pub tensor_info: Option<TensorInfo>,
     pub children: BTreeMap<Key, ModuleInfo>,
-    pub params: usize,
+    pub total_tensors: usize,
+    pub total_params: usize,
 }
 
 impl ModuleInfo {
@@ -37,8 +43,54 @@ impl ModuleInfo {
             full_name,
             tensor_info: None,
             children: BTreeMap::new(),
-            params: 0,
+            total_tensors: 0,
+            total_params: 0,
         }
+    }
+
+    pub fn build(tensors: HashMap<String, &TensorInfo>) -> Result<Self> {
+        let mut root = ModuleInfo::new("".to_string());
+
+        for (name, info) in tensors {
+            let params = info.shape.iter().copied().product::<usize>();
+            let parts: Vec<&str> = name.split('.').collect();
+            let mut current = &mut root;
+            current.total_params += params;
+            current.total_tensors += 1;
+
+            for (i, &part) in parts.iter().enumerate() {
+                let key = match part.parse() {
+                    Ok(i) => Key::Index(i),
+                    Err(_) => Key::Name(part.to_string()),
+                };
+                current = current
+                    .children
+                    .entry(key)
+                    .or_insert_with(|| ModuleInfo::new(name.clone()));
+                current.total_params += params;
+                current.total_tensors += 1;
+
+                if i == parts.len() - 1 {
+                    current.tensor_info = Some(info.clone());
+                }
+            }
+        }
+
+        Ok(root)
+    }
+
+    pub fn flatten_single_children(&mut self) {
+        self.children = mem::take(&mut self.children)
+            .into_iter()
+            .map(|(k, mut v)| {
+                v.flatten_single_children();
+                if v.children.len() != 1 {
+                    return (k, v);
+                }
+                let (ck, cv) = v.children.into_iter().next().unwrap();
+                (Key::Cons(Box::new(k), Box::new(ck)), cv)
+            })
+            .collect();
     }
 }
 
@@ -51,13 +103,13 @@ pub struct SafeTensorsData {
 impl SafeTensorsData {
     pub fn from_file(file_path: &Path) -> Result<Self> {
         let (header_size, metadata) = read_metadata_from_file(file_path)?;
-        let tree = build_tree(metadata.tensors())?;
-        let flattened_tree = flatten_single_child_chains(tree);
+        let mut tree = ModuleInfo::build(metadata.tensors())?;
+        tree.flatten_single_children();
 
         Ok(Self {
             metadata,
             header_size,
-            tree: flattened_tree,
+            tree,
         })
     }
 }
@@ -86,51 +138,4 @@ fn read_metadata_from_file(file_path: &Path) -> Result<(usize, Metadata)> {
         .map_err(|_| SafeTensorError::InvalidHeaderDeserialization)?;
 
     Ok((n, metadata))
-}
-
-fn build_tree(tensors: HashMap<String, &TensorInfo>) -> Result<ModuleInfo> {
-    let mut root = ModuleInfo::new("".to_string());
-
-    for (name, info) in tensors {
-        let params = info.shape.iter().copied().product::<usize>();
-        let parts: Vec<&str> = name.split('.').collect();
-        let mut current = &mut root;
-        current.params += params;
-
-        for (i, &part) in parts.iter().enumerate() {
-            let key = match part.parse() {
-                Ok(i) => Key::Index(i),
-                Err(_) => Key::Name(part.to_string()),
-            };
-            current = current
-                .children
-                .entry(key)
-                .or_insert_with(|| ModuleInfo::new(name.clone()));
-            current.params += params;
-
-            if i == parts.len() - 1 {
-                current.tensor_info = Some(info.clone());
-            }
-        }
-    }
-
-    Ok(root)
-}
-
-fn flatten_single_child_chains(mut module: ModuleInfo) -> ModuleInfo {
-    for (_, child) in module.children.iter_mut() {
-        *child = flatten_single_child_chains(std::mem::take(child));
-    }
-
-    while module.children.len() == 1 && module.tensor_info.is_none() {
-        let children = std::mem::take(&mut module.children);
-        let (key, child) = children.into_iter().next().unwrap();
-        if child.children.is_empty() {
-            module.children.insert(key, child);
-            break;
-        }
-        module = child;
-    }
-
-    module
 }
