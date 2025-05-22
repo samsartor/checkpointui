@@ -1,10 +1,12 @@
-use anyhow::Result;
-use safetensors::tensor::{TensorInfo, Metadata, SafeTensorError};
+use anyhow::{Result, bail};
+use safetensors::tensor::{Metadata, SafeTensorError, TensorInfo};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+
+const HEADER_MIB_LIMIT: usize = 100;
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone)]
 pub enum Key {
@@ -51,7 +53,7 @@ impl SafeTensorsData {
         let (header_size, metadata) = read_metadata_from_file(file_path)?;
         let tree = build_tree(metadata.tensors())?;
         let flattened_tree = flatten_single_child_chains(tree);
-        
+
         Ok(Self {
             metadata,
             header_size,
@@ -60,22 +62,29 @@ impl SafeTensorsData {
     }
 }
 
-fn read_metadata_from_file(file_path: &Path) -> Result<(usize, Metadata), SafeTensorError> {
+fn read_metadata_from_file(file_path: &Path) -> Result<(usize, Metadata)> {
     let mut file = File::open(file_path)?;
-    
+
     let mut header_size_bytes = [0u8; 8];
     file.read_exact(&mut header_size_bytes)?;
     let n = u64::from_le_bytes(header_size_bytes) as usize;
-    
+
+    if n > HEADER_MIB_LIMIT * 1024 * 1024 {
+        bail!(
+            "Header is larger than {HEADER_MIB_LIMIT}MiB. Is {} a safetensors file?",
+            file_path.display()
+        );
+    }
+
     let mut metadata_bytes = vec![0u8; n];
     file.read_exact(&mut metadata_bytes)?;
-    
-    let metadata_str = std::str::from_utf8(&metadata_bytes)
-        .map_err(|_| SafeTensorError::InvalidHeader)?;
-    
+
+    let metadata_str =
+        std::str::from_utf8(&metadata_bytes).map_err(|_| SafeTensorError::InvalidHeader)?;
+
     let metadata: Metadata = serde_json::from_str(metadata_str)
         .map_err(|_| SafeTensorError::InvalidHeaderDeserialization)?;
-    
+
     Ok((n, metadata))
 }
 
@@ -93,9 +102,10 @@ fn build_tree(tensors: HashMap<String, &TensorInfo>) -> Result<ModuleInfo> {
                 Ok(i) => Key::Index(i),
                 Err(_) => Key::Name(part.to_string()),
             };
-            current = current.children.entry(key).or_insert_with(|| {
-                ModuleInfo::new(name.clone())
-            });
+            current = current
+                .children
+                .entry(key)
+                .or_insert_with(|| ModuleInfo::new(name.clone()));
             current.params += params;
 
             if i == parts.len() - 1 {
@@ -111,7 +121,7 @@ fn flatten_single_child_chains(mut module: ModuleInfo) -> ModuleInfo {
     for (_, child) in module.children.iter_mut() {
         *child = flatten_single_child_chains(std::mem::take(child));
     }
-    
+
     while module.children.len() == 1 && module.tensor_info.is_none() {
         let children = std::mem::take(&mut module.children);
         let (key, child) = children.into_iter().next().unwrap();
@@ -121,6 +131,6 @@ fn flatten_single_child_chains(mut module: ModuleInfo) -> ModuleInfo {
         }
         module = child;
     }
-    
+
     module
 }
