@@ -10,7 +10,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget},
 };
 use std::collections::HashSet;
 use std::io::{Stdout, stdout};
@@ -34,6 +34,8 @@ struct TreeState {
     selected_index: usize,
     visible_items: Vec<TreeItem>,
     data: ArcRef<ModuleInfo>,
+    list_state: ListState,
+    scroll_state: ScrollbarState,
 }
 
 #[derive(Clone)]
@@ -63,16 +65,35 @@ impl TreeState {
             selected_index: 0,
             visible_items: Vec::new(),
             data,
+            list_state: ListState::default(),
+            scroll_state: ScrollbarState::new(0),
         }
     }
 
     fn rebuild_visible_items(&mut self) {
         self.visible_items.clear();
-        self.build_visible_items(self.data.clone(), Vec::new(), 0);
+        
+        // Navigate to current module
+        let mut current_module = self.data.clone();
+        for key in &self.current_path {
+            if let Some(child) = current_module.children.get(key) {
+                current_module = ArcRef::new(current_module).map(|m| &m.children[key]);
+            } else {
+                // Path no longer exists, reset to root
+                self.current_path.clear();
+                current_module = self.data.clone();
+                break;
+            }
+        }
+        
+        self.build_visible_items(current_module, self.current_path.clone(), 0);
 
         if self.selected_index >= self.visible_items.len() {
             self.selected_index = self.visible_items.len().saturating_sub(1);
         }
+        
+        self.list_state.select(Some(self.selected_index));
+        self.scroll_state = ScrollbarState::new(self.visible_items.len().saturating_sub(1));
     }
 
     fn build_visible_items(&mut self, module: ArcRef<ModuleInfo>, path: Vec<Key>, depth: usize) {
@@ -112,12 +133,36 @@ impl TreeState {
     fn move_up(&mut self) {
         if self.selected_index > 0 {
             self.selected_index -= 1;
+            self.list_state.select(Some(self.selected_index));
+            self.scroll_state = self.scroll_state.position(self.selected_index);
         }
     }
 
     fn move_down(&mut self) {
         if self.selected_index < self.visible_items.len().saturating_sub(1) {
             self.selected_index += 1;
+            self.list_state.select(Some(self.selected_index));
+            self.scroll_state = self.scroll_state.position(self.selected_index);
+        }
+    }
+    
+    fn move_right(&mut self) {
+        if let Some(item) = self.visible_items.get(self.selected_index) {
+            if item.has_children() {
+                // Navigate into the module
+                self.current_path = item.path.clone();
+                self.selected_index = 0;
+                self.rebuild_visible_items();
+            }
+        }
+    }
+    
+    fn move_left(&mut self) {
+        if !self.current_path.is_empty() {
+            // Navigate up to parent module
+            self.current_path.pop();
+            self.selected_index = 0;
+            self.rebuild_visible_items();
         }
     }
 }
@@ -148,6 +193,8 @@ impl App {
                 (KeyCode::Char('q') | KeyCode::Esc, _) => self.should_quit = true,
                 (KeyCode::Up, Some(s)) => s.move_up(),
                 (KeyCode::Down, Some(s)) => s.move_down(),
+                (KeyCode::Left, Some(s)) => s.move_left(),
+                (KeyCode::Right, Some(s)) => s.move_right(),
                 (KeyCode::Char(' ') | KeyCode::Enter, Some(s)) => {
                     s.toggle_expanded();
                     s.rebuild_visible_items();
@@ -210,7 +257,7 @@ impl App {
 
         // Bottom bar
         let help_text = if self.tree_state.is_some() {
-            "↑/↓: Navigate | Space/Enter: Expand/Collapse | q/Esc: Quit"
+            "↑/↓: Navigate | ←/→: Enter/Exit Module | Space/Enter: Expand/Collapse | q/Esc: Quit"
         } else {
             "q/Esc: Quit"
         };
@@ -221,8 +268,8 @@ impl App {
         f.render_widget(bottom_bar, chunks[2]);
     }
 
-    fn render_tree_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        let Some(tree) = &self.tree_state else { return };
+    fn render_tree_panel(&mut self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let Some(tree) = &mut self.tree_state else { return };
         let items: Vec<ListItem> = tree
             .visible_items
             .iter()
@@ -254,11 +301,18 @@ impl App {
             })
             .collect();
 
-        let tree = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("Module Tree"))
-            .style(Style::default().fg(Color::White));
+        let current_path_str = if tree.current_path.is_empty() {
+            "Root".to_string()
+        } else {
+            tree.current_path.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(".")
+        };
 
-        f.render_widget(tree, area);
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(format!("Module Tree - {}", current_path_str)))
+            .style(Style::default().fg(Color::White))
+            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+
+        StatefulWidget::render(list, area, f.buffer_mut(), &mut tree.list_state);
     }
 
     fn render_info_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
