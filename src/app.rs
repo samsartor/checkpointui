@@ -6,16 +6,32 @@ use ratatui::crossterm::terminal::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io::{Stdout, stdout};
+use std::path::PathBuf;
+
+use crate::model::SafeTensorsData;
 
 pub type Backend = CrosstermBackend<Stdout>;
 
 pub struct App {
     should_quit: bool,
+    data: Option<SafeTensorsData>,
+    file_path: Option<PathBuf>,
 }
 
 impl App {
     pub fn new() -> Self {
-        Self { should_quit: false }
+        Self { 
+            should_quit: false,
+            data: None,
+            file_path: None,
+        }
+    }
+
+    pub fn load_file(&mut self, file_path: PathBuf) -> Result<(), Error> {
+        let data = SafeTensorsData::from_file(&file_path)?;
+        self.data = Some(data);
+        self.file_path = Some(file_path);
+        Ok(())
     }
 
     pub fn handle_events(&mut self) -> Result<(), Error> {
@@ -32,10 +48,18 @@ impl App {
         while !self.should_quit {
             terminal.draw(|f| {
                 let area = f.area();
+                let content = if let Some(data) = &self.data {
+                    format!(
+                        "SafeTensors TUI Inspector\n\nFile: {}\nTensors: {}\nParameters: {}\n\nPress 'q' or Esc to quit",
+                        self.file_path.as_ref().unwrap().display(),
+                        data.metadata.tensors().len(),
+                        data.tree.params
+                    )
+                } else {
+                    "SafeTensors TUI Inspector\n\nNo file loaded\n\nPress 'q' or Esc to quit".to_string()
+                };
                 f.render_widget(
-                    ratatui::widgets::Paragraph::new(
-                        "SafeTensors TUI Inspector\n\nPress 'q' or Esc to quit",
-                    ),
+                    ratatui::widgets::Paragraph::new(content),
                     area,
                 );
             })?;
