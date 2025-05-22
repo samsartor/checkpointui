@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clap = "4.5.38"
+colored_json = "5.0.0"
+human_format = "1.1.0"
+ratatui = "0.29.0"
+regex = "1.11.1"
+safetensors = "0.5.3"
+serde_json = "1.0.140"
