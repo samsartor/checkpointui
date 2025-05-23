@@ -6,23 +6,27 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Wrap,
+};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use serde_json::Value;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{Stdout, stdout};
 use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tui_scrollview::{ScrollView, ScrollViewState};
 
 use crate::model::{Key, ModuleInfo, SafeTensorsData, shorten_value};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 enum Panel {
+    #[default]
     Tree,
     SelectedInfo,
     FileInfo,
@@ -50,6 +54,7 @@ pub const DTYPE_FG: Color = Color::Yellow;
 pub const COUNT_FG: Color = Color::White;
 pub const BYTESIZE_FG: Color = Color::Magenta;
 
+#[derive(Default)]
 pub struct App {
     should_quit: bool,
     file_path: Option<PathBuf>,
@@ -59,6 +64,7 @@ pub struct App {
     count_formatter: Formatter,
     bytes_formatter: Formatter,
     selected_panel: Panel,
+    pub helptext: String,
 }
 
 struct TreeState {
@@ -194,26 +200,18 @@ impl TreeState {
 
 impl App {
     pub fn new() -> Self {
-        let mut count_formatter = Formatter::new();
+        let mut this = App::default();
         let mut count_scales = Scales::new();
         count_scales
             .with_base(1000)
             .with_suffixes(vec!["", "K", "M", "B", "T"]);
-        count_formatter.with_separator("").with_scales(count_scales);
-        let mut bytes_formatter = Formatter::new();
-        bytes_formatter
+        this.count_formatter
+            .with_separator("")
+            .with_scales(count_scales);
+        this.bytes_formatter
             .with_scales(Scales::Binary())
             .with_units("B");
-        Self {
-            should_quit: false,
-            file_path: None,
-            tree_state: None,
-            extra_metadata: None,
-            formatted_extra: String::new(),
-            count_formatter,
-            bytes_formatter,
-            selected_panel: Panel::Tree,
-        }
+        this
     }
 
     pub fn load_file(&mut self, file_path: PathBuf) -> Result<(), Error> {
@@ -276,14 +274,14 @@ impl App {
 
         // Top bar
         let title = if let Some(path) = &self.file_path {
-            format!("SafeTensors Inspector - {}", path.display())
+            format!("CheckpoinTUI - {}", path.display())
         } else {
-            "SafeTensors Inspector - No file loaded".to_string()
+            "CheckpoinTUI - No file loaded".to_string()
         };
 
         let top_bar = Paragraph::new(title)
             .block(Block::default().borders(Borders::ALL))
-            .style(Style::default().fg(Color::Gray));
+            .style(Style::default().fg(PANEL_BORDER_SECONDARY));
         f.render_widget(top_bar, chunks[0]);
 
         // Main content area
@@ -310,8 +308,7 @@ impl App {
             self.render_selected_info_panel(f, info_chunks[0]);
             self.render_file_info_panel(f, info_chunks[1]);
         } else {
-            let help_text = "No file loaded.\n\nUsage: checkpointui <safetensors_file>\n\nPress 'q' or Esc to quit";
-            let help = Paragraph::new(help_text)
+            let help = Paragraph::new(self.helptext.as_str())
                 .block(Block::default().borders(Borders::ALL).title("Help"))
                 .style(Style::default().fg(Color::White));
             f.render_widget(help, chunks[1]);
@@ -330,7 +327,7 @@ impl App {
         f.render_widget(bottom_bar, chunks[2]);
     }
 
-    fn render_tree_panel(&mut self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+    fn render_tree_panel(&mut self, f: &mut ratatui::Frame, area: Rect) {
         let Some(tree) = &self.tree_state else {
             return;
         };
@@ -384,7 +381,7 @@ impl App {
             })
             .collect();
 
-        let mut title: Line = "Module Tree".bold().into();
+        let mut title: Line = "Module Tree".into();
         if !tree.current_path.is_empty() {
             title += " - ".into();
             title += tree
@@ -398,26 +395,14 @@ impl App {
 
         let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
 
-        let border_style = if self.selected_panel == Panel::Tree {
-            Style::default().fg(PANEL_BORDER_SELECTED)
-        } else {
-            Style::default().fg(PANEL_BORDER_SECONDARY)
-        };
-
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style)
-                    .title(title),
-            )
+            .block(self.format_block(title, Panel::Tree))
             .style(Style::default().fg(Color::White))
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
-
-        f.render_stateful_widget(list, area, &mut *tree.list_state.borrow_mut());
+        list.render(area, f.buffer_mut(), &mut *tree.list_state.borrow_mut());
     }
 
-    fn render_selected_info_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+    fn render_selected_info_panel(&self, f: &mut ratatui::Frame, area: Rect) {
         let Some(tree) = &self.tree_state else { return };
         let selected_item = tree
             .list_state
@@ -449,7 +434,7 @@ impl App {
                     self.format_bytes(tensor_info.data_offsets.1 - tensor_info.data_offsets.0)
                         .fg(BYTESIZE_FG),
                 ]);
-                "Tensor Info".bold()
+                "Tensor Info"
             } else {
                 text.push_line(vec![
                     "Path: ".bold(),
@@ -463,33 +448,22 @@ impl App {
                     "Parameters: ".bold(),
                     self.format_count(item.info.total_params).fg(COUNT_FG),
                 ]);
-                "Module Info".bold()
+                "Module Info"
             }
         } else {
             text.extend(Text::from("No item selected".gray()));
-            "Selection Info".bold()
-        };
-
-        let border_style = if self.selected_panel == Panel::SelectedInfo {
-            Style::default().fg(PANEL_BORDER_SELECTED)
-        } else {
-            Style::default().fg(PANEL_BORDER_SECONDARY)
+            "Selection Info"
         };
 
         let info = Paragraph::new(text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style)
-                    .title(title),
-            )
+            .block(self.format_block(title, Panel::SelectedInfo))
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false });
 
         f.render_widget(info, area);
     }
 
-    fn render_file_info_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+    fn render_file_info_panel(&self, f: &mut ratatui::Frame, area: Rect) {
         let Some(tree) = &self.tree_state else { return };
 
         let mut text = Text::default();
@@ -523,23 +497,28 @@ impl App {
             }
         }
 
-        let border_style = if self.selected_panel == Panel::FileInfo {
-            Style::default().fg(PANEL_BORDER_SELECTED)
-        } else {
-            Style::default().fg(PANEL_BORDER_SECONDARY)
-        };
-
         let info = Paragraph::new(text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style)
-                    .title("File Info".bold()),
-            )
+            .block(self.format_block("File Info", Panel::FileInfo))
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false });
 
         f.render_widget(info, area);
+    }
+
+    fn format_block<'a>(&self, title: impl Into<Line<'a>>, panel: Panel) -> Block<'a> {
+        let mut title: Line = title.into();
+        let border_style = if self.selected_panel == panel {
+            title += "*".into();
+            Style::default().fg(PANEL_BORDER_SELECTED)
+        } else {
+            Style::default().fg(PANEL_BORDER)
+        };
+        title = title.bold();
+
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(title)
     }
 
     fn format_count(&self, count: usize) -> String {

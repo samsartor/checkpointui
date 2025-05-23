@@ -1,7 +1,7 @@
 mod app;
 mod model;
 
-use clap::Parser;
+use clap::{CommandFactory as _, Parser};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -14,10 +14,11 @@ struct Cli {
 
 fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
-    
+
     let mut terminal = app::setup_terminal()?;
     let mut app = app::App::new();
-    
+    app.helptext = Cli::command().render_long_help().to_string();
+
     if let Some(file_path) = cli.file_path {
         if let Err(e) = app.load_file(file_path) {
             app::restore_terminal(&mut terminal)?;
@@ -25,7 +26,7 @@ fn main() -> Result<(), anyhow::Error> {
             return Err(e);
         }
     }
-    
+
     let result = app.run(&mut terminal);
     app::restore_terminal(&mut terminal)?;
     result
