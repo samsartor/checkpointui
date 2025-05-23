@@ -28,6 +28,23 @@ use std::sync::Arc;
 
 use crate::model::{Key, ModuleInfo, SafeTensorsData, shorten_value};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Panel {
+    Tree,
+    SelectedInfo,
+    FileInfo,
+}
+
+impl Panel {
+    fn next(self) -> Self {
+        match self {
+            Panel::Tree => Panel::SelectedInfo,
+            Panel::SelectedInfo => Panel::FileInfo,
+            Panel::FileInfo => Panel::Tree,
+        }
+    }
+}
+
 pub type Backend = CrosstermBackend<Stdout>;
 
 pub struct App {
@@ -38,6 +55,7 @@ pub struct App {
     formatted_extra: String,
     count_formatter: Formatter,
     bytes_formatter: Formatter,
+    selected_panel: Panel,
 }
 
 struct TreeState {
@@ -191,6 +209,7 @@ impl App {
             formatted_extra: String::new(),
             count_formatter,
             bytes_formatter,
+            selected_panel: Panel::Tree,
         }
     }
 
@@ -213,16 +232,21 @@ impl App {
 
     pub fn handle_events(&mut self) -> Result<(), Error> {
         if let Event::Key(key) = event::read()? {
-            match (key.code, &mut self.tree_state) {
-                (KeyCode::Char('q') | KeyCode::Esc, _) => self.should_quit = true,
-                (KeyCode::Up, Some(s)) => s.move_up(),
-                (KeyCode::Down, Some(s)) => s.move_down(),
-                (KeyCode::Left, Some(s)) => s.move_left(),
-                (KeyCode::Right, Some(s)) => s.move_right(),
-                (KeyCode::Char(' ') | KeyCode::Enter, Some(s)) => {
+            match (key.code, self.selected_panel, &mut self.tree_state) {
+                (KeyCode::Char('q') | KeyCode::Esc, _, _) => self.should_quit = true,
+                (KeyCode::Tab, _, _) => self.selected_panel = self.selected_panel.next(),
+
+                // Tree panel controls
+                (KeyCode::Up, Panel::Tree, Some(s)) => s.move_up(),
+                (KeyCode::Down, Panel::Tree, Some(s)) => s.move_down(),
+                (KeyCode::Left, Panel::Tree, Some(s)) => s.move_left(),
+                (KeyCode::Right, Panel::Tree, Some(s)) => s.move_right(),
+                (KeyCode::Char(' ') | KeyCode::Enter, Panel::Tree, Some(s)) => {
                     s.toggle_expanded();
                     s.rebuild_visible_items();
                 }
+
+                // TODO: Add controls for other panels later
                 _ => {}
             }
         }
@@ -292,7 +316,7 @@ impl App {
 
         // Bottom bar
         let help_text = if self.tree_state.is_some() {
-            "↑/↓: Navigate | ←/→: Enter/Exit Module | Space/Enter: Expand/Collapse | q/Esc: Quit"
+            "↑/↓: Navigate | ←/→: Enter/Exit Module | Space/Enter: Expand/Collapse | Tab: Switch Panel | q/Esc: Quit"
         } else {
             "q/Esc: Quit"
         };
@@ -357,10 +381,11 @@ impl App {
             })
             .collect();
 
-        let current_path_str = if tree.current_path.is_empty() {
-            "Root".gray()
-        } else {
-            tree.current_path
+        let mut title: Line = "Module Tree".bold().into();
+        if !tree.current_path.is_empty() {
+            title += " - ".into();
+            title += tree
+                .current_path
                 .iter()
                 .map(|k| k.to_string())
                 .collect::<Vec<_>>()
@@ -370,11 +395,18 @@ impl App {
 
         let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
 
+        let border_style = if self.selected_panel == Panel::Tree {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
         let list = List::new(items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Module Tree - ".bold() + current_path_str.bold()),
+                    .border_style(border_style)
+                    .title(title),
             )
             .style(Style::default().fg(Color::White))
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
@@ -393,33 +425,33 @@ impl App {
         let mut text = Text::default();
         let title = if let Some(item) = selected_item {
             if let Some(tensor_info) = &item.info.tensor_info {
-                text.push_line(vec!["Path: ".into(), item.info.full_name.as_str().cyan()]);
+                text.push_line(vec!["Path: ".bold(), item.info.full_name.as_str().cyan()]);
                 text.push_line(vec![
-                    "Shape: ".into(),
+                    "Shape: ".bold(),
                     format!("{:?}", tensor_info.shape).white(),
                 ]);
                 text.push_line(vec![
-                    "Data Type: ".into(),
+                    "Data Type: ".bold(),
                     format!("{:?}", tensor_info.dtype).yellow(),
                 ]);
                 text.push_line(vec![
-                    "Parameters: ".into(),
+                    "Parameters: ".bold(),
                     self.format_count(item.info.total_params).green(),
                 ]);
                 text.push_line(vec![
-                    "Size: ".into(),
+                    "Size: ".bold(),
                     self.format_bytes(tensor_info.data_offsets.1 - tensor_info.data_offsets.0)
                         .magenta(),
                 ]);
                 "Tensor Info".bold()
             } else {
-                text.push_line(vec!["Path: ".into(), item.info.full_name.as_str().blue()]);
+                text.push_line(vec!["Path: ".bold(), item.info.full_name.as_str().blue()]);
                 text.push_line(vec![
-                    "Tensors: ".into(),
+                    "Tensors: ".bold(),
                     item.info.total_tensors.to_string().white(),
                 ]);
                 text.push_line(vec![
-                    "Parameters: ".into(),
+                    "Parameters: ".bold(),
                     self.format_count(item.info.total_params).green(),
                 ]);
                 "Module Info".bold()
@@ -429,8 +461,19 @@ impl App {
             "Selection Info".bold()
         };
 
+        let border_style = if self.selected_panel == Panel::SelectedInfo {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
         let info = Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL).title(title))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(border_style)
+                    .title(title),
+            )
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false });
 
@@ -463,7 +506,6 @@ impl App {
 
         // Add metadata section if available
         if self.extra_metadata.is_some() {
-            text.push_line("");
             if let Ok(mut metadata_text) = ansi_to_tui::IntoText::into_text(&self.formatted_extra) {
                 if let Some(first) = metadata_text.lines.get_mut(0) {
                     first.spans.insert(0, "Metadata: ".bold());
@@ -472,10 +514,17 @@ impl App {
             }
         }
 
+        let border_style = if self.selected_panel == Panel::FileInfo {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
         let info = Paragraph::new(text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(border_style)
                     .title("File Info".bold()),
             )
             .style(Style::default().fg(Color::White))
