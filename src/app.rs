@@ -40,6 +40,16 @@ impl Panel {
 
 pub type Backend = CrosstermBackend<Stdout>;
 
+pub const PANEL_BORDER: Color = Color::White;
+pub const PANEL_BORDER_SECONDARY: Color = Color::White;
+pub const PANEL_BORDER_SELECTED: Color = Color::Yellow;
+pub const MODULE_FG: Color = Color::Blue;
+pub const TENSOR_FG: Color = Color::Cyan;
+pub const SHAPE_FG: Color = Color::White;
+pub const DTYPE_FG: Color = Color::Yellow;
+pub const COUNT_FG: Color = Color::White;
+pub const BYTESIZE_FG: Color = Color::Magenta;
+
 pub struct App {
     should_quit: bool,
     file_path: Option<PathBuf>,
@@ -349,9 +359,9 @@ impl App {
 
                 // Name
                 let name_span = if item.is_tensor() {
-                    item.name.as_str().cyan()
+                    item.name.as_str().fg(TENSOR_FG)
                 } else if item.has_children() {
-                    item.name.as_str().blue().bold()
+                    item.name.as_str().fg(MODULE_FG).bold()
                 } else {
                     item.name.as_str().white()
                 };
@@ -359,15 +369,15 @@ impl App {
 
                 // Parameter count
                 let param_text = format!(" ({})", self.format_count(item.info.total_params));
-                spans.push(param_text.gray());
+                spans.push(param_text.fg(COUNT_FG));
 
                 // Tensor details
                 if let Some(tensor_info) = &item.info.tensor_info {
-                    spans.push(format!(" {:?}", tensor_info.shape).white());
-                    spans.push(format!(" {:?}", tensor_info.dtype).yellow());
+                    spans.push(format!(" {:?}", tensor_info.shape).fg(SHAPE_FG));
+                    spans.push(format!(" {:?}", tensor_info.dtype).fg(DTYPE_FG));
                     let size =
                         self.format_bytes(tensor_info.data_offsets.1 - tensor_info.data_offsets.0);
-                    spans.push(format!(" {}", size).magenta());
+                    spans.push(format!(" {}", size).fg(BYTESIZE_FG));
                 }
 
                 Line::from(spans)
@@ -383,15 +393,15 @@ impl App {
                 .map(|k| k.to_string())
                 .collect::<Vec<_>>()
                 .join(".")
-                .blue()
+                .fg(MODULE_FG)
         };
 
         let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
 
         let border_style = if self.selected_panel == Panel::Tree {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(PANEL_BORDER_SELECTED)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(PANEL_BORDER_SECONDARY)
         };
 
         let list = List::new(items)
@@ -418,34 +428,40 @@ impl App {
         let mut text = Text::default();
         let title = if let Some(item) = selected_item {
             if let Some(tensor_info) = &item.info.tensor_info {
-                text.push_line(vec!["Path: ".bold(), item.info.full_name.as_str().cyan()]);
+                text.push_line(vec![
+                    "Path: ".bold(),
+                    item.info.full_name.as_str().fg(TENSOR_FG),
+                ]);
                 text.push_line(vec![
                     "Shape: ".bold(),
-                    format!("{:?}", tensor_info.shape).white(),
+                    format!("{:?}", tensor_info.shape).fg(SHAPE_FG),
                 ]);
                 text.push_line(vec![
                     "Data Type: ".bold(),
-                    format!("{:?}", tensor_info.dtype).yellow(),
+                    format!("{:?}", tensor_info.dtype).fg(DTYPE_FG),
                 ]);
                 text.push_line(vec![
                     "Parameters: ".bold(),
-                    self.format_count(item.info.total_params).green(),
+                    self.format_count(item.info.total_params).fg(COUNT_FG),
                 ]);
                 text.push_line(vec![
                     "Size: ".bold(),
                     self.format_bytes(tensor_info.data_offsets.1 - tensor_info.data_offsets.0)
-                        .magenta(),
+                        .fg(BYTESIZE_FG),
                 ]);
                 "Tensor Info".bold()
             } else {
-                text.push_line(vec!["Path: ".bold(), item.info.full_name.as_str().blue()]);
+                text.push_line(vec![
+                    "Path: ".bold(),
+                    item.info.full_name.as_str().fg(MODULE_FG),
+                ]);
                 text.push_line(vec![
                     "Tensors: ".bold(),
-                    item.info.total_tensors.to_string().white(),
+                    item.info.total_tensors.to_string().fg(COUNT_FG),
                 ]);
                 text.push_line(vec![
                     "Parameters: ".bold(),
-                    self.format_count(item.info.total_params).green(),
+                    self.format_count(item.info.total_params).fg(COUNT_FG),
                 ]);
                 "Module Info".bold()
             }
@@ -455,9 +471,9 @@ impl App {
         };
 
         let border_style = if self.selected_panel == Panel::SelectedInfo {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(PANEL_BORDER_SELECTED)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(PANEL_BORDER_SECONDARY)
         };
 
         let info = Paragraph::new(text)
@@ -486,15 +502,15 @@ impl App {
                 .unwrap()
                 .display()
                 .to_string()
-                .cyan(),
+                .fg(TENSOR_FG),
         ]);
         text.push_line(vec![
             "Total Tensors: ".bold(),
-            tree.data.total_tensors.to_string().white(),
+            tree.data.total_tensors.to_string().fg(COUNT_FG),
         ]);
         text.push_line(vec![
             "Total Parameters: ".bold(),
-            self.format_count(tree.data.total_params).green(),
+            self.format_count(tree.data.total_params).fg(COUNT_FG),
         ]);
 
         // Add metadata section if available
@@ -508,9 +524,9 @@ impl App {
         }
 
         let border_style = if self.selected_panel == Panel::FileInfo {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(PANEL_BORDER_SELECTED)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(PANEL_BORDER_SECONDARY)
         };
 
         let info = Paragraph::new(text)
