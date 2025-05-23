@@ -6,18 +6,11 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::Wrap;
-use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Margin},
-    style::{Color, Style, Stylize},
-    widgets::{
-        Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, StatefulWidget,
-    },
-};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::HashSet;
