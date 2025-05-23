@@ -256,7 +256,7 @@ impl App {
 
         let top_bar = Paragraph::new(title)
             .block(Block::default().borders(Borders::ALL))
-            .style(Style::default().fg(Color::Yellow));
+            .style(Style::default().fg(Color::Gray));
         f.render_widget(top_bar, chunks[0]);
 
         // Main content area
@@ -270,7 +270,7 @@ impl App {
                 .split(chunks[1]);
 
             self.render_tree_panel(f, main_chunks[0]);
-            
+
             // Split info panel into two vertical sections
             let info_chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -279,7 +279,7 @@ impl App {
                     Constraint::Percentage(50), // File info
                 ])
                 .split(main_chunks[1]);
-            
+
             self.render_selected_info_panel(f, info_chunks[0]);
             self.render_file_info_panel(f, info_chunks[1]);
         } else {
@@ -358,13 +358,14 @@ impl App {
             .collect();
 
         let current_path_str = if tree.current_path.is_empty() {
-            "Root".to_string()
+            "Root".gray()
         } else {
             tree.current_path
                 .iter()
                 .map(|k| k.to_string())
                 .collect::<Vec<_>>()
                 .join(".")
+                .blue()
         };
 
         let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
@@ -373,7 +374,7 @@ impl App {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(format!("Module Tree - {}", current_path_str)),
+                    .title("Module Tree - ".bold() + current_path_str.bold()),
             )
             .style(Style::default().fg(Color::White))
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
@@ -388,29 +389,44 @@ impl App {
             .borrow()
             .selected()
             .and_then(|i| tree.visible_items.get(i));
-        
+
         let mut text = Text::default();
         let title = if let Some(item) = selected_item {
             if let Some(tensor_info) = &item.info.tensor_info {
-                text.extend(Text::from(vec![
-                    Line::from(vec!["Name: ".into(), item.info.full_name.cyan()]),
-                    Line::from(vec!["Shape: ".into(), format!("{:?}", tensor_info.shape).white()]),
-                    Line::from(vec!["Data Type: ".into(), format!("{:?}", tensor_info.dtype).yellow()]),
-                    Line::from(vec!["Parameters: ".into(), self.format_count(item.info.total_params).green()]),
-                    Line::from(vec!["Size: ".into(), self.format_bytes(tensor_info.data_offsets.1 - tensor_info.data_offsets.0).magenta()]),
-                ]));
-                "Tensor Info"
+                text.push_line(vec!["Path: ".into(), item.info.full_name.as_str().cyan()]);
+                text.push_line(vec![
+                    "Shape: ".into(),
+                    format!("{:?}", tensor_info.shape).white(),
+                ]);
+                text.push_line(vec![
+                    "Data Type: ".into(),
+                    format!("{:?}", tensor_info.dtype).yellow(),
+                ]);
+                text.push_line(vec![
+                    "Parameters: ".into(),
+                    self.format_count(item.info.total_params).green(),
+                ]);
+                text.push_line(vec![
+                    "Size: ".into(),
+                    self.format_bytes(tensor_info.data_offsets.1 - tensor_info.data_offsets.0)
+                        .magenta(),
+                ]);
+                "Tensor Info".bold()
             } else {
-                text.extend(Text::from(vec![
-                    Line::from(vec!["Name: ".into(), item.info.full_name.cyan()]),
-                    Line::from(vec!["Tensors: ".into(), item.info.total_tensors.to_string().white()]),
-                    Line::from(vec!["Parameters: ".into(), self.format_count(item.info.total_params).green()]),
-                ]));
-                "Module Info"
+                text.push_line(vec!["Path: ".into(), item.info.full_name.as_str().blue()]);
+                text.push_line(vec![
+                    "Tensors: ".into(),
+                    item.info.total_tensors.to_string().white(),
+                ]);
+                text.push_line(vec![
+                    "Parameters: ".into(),
+                    self.format_count(item.info.total_params).green(),
+                ]);
+                "Module Info".bold()
             }
         } else {
             text.extend(Text::from("No item selected".gray()));
-            "Selection Info"
+            "Selection Info".bold()
         };
 
         let info = Paragraph::new(text)
@@ -423,30 +439,45 @@ impl App {
 
     fn render_file_info_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         let Some(tree) = &self.tree_state else { return };
-        
+
         let mut text = Text::default();
-        
+
         // File info section
-        text.extend(Text::from(vec![
-            Line::from(vec!["File: ".into(), self.file_path.as_ref().unwrap().display().to_string().cyan()]),
-            Line::from(vec!["Total Tensors: ".into(), tree.data.total_tensors.to_string().white()]),
-            Line::from(vec!["Total Parameters: ".into(), self.format_count(tree.data.total_params).green()]),
-        ]));
+        text.push_line(vec![
+            "Path: ".bold(),
+            self.file_path
+                .as_ref()
+                .unwrap()
+                .display()
+                .to_string()
+                .cyan(),
+        ]);
+        text.push_line(vec![
+            "Total Tensors: ".bold(),
+            tree.data.total_tensors.to_string().white(),
+        ]);
+        text.push_line(vec![
+            "Total Parameters: ".bold(),
+            self.format_count(tree.data.total_params).green(),
+        ]);
 
         // Add metadata section if available
         if self.extra_metadata.is_some() {
-            text.extend(Text::from(vec![
-                Line::from(""),
-                Line::from("Metadata:".yellow().bold()),
-            ]));
-            
-            if let Ok(metadata_text) = ansi_to_tui::IntoText::into_text(&self.formatted_extra) {
-                text.extend(metadata_text);
+            text.push_line("");
+            if let Ok(mut metadata_text) = ansi_to_tui::IntoText::into_text(&self.formatted_extra) {
+                if let Some(first) = metadata_text.lines.get_mut(0) {
+                    first.spans.insert(0, "Metadata: ".bold());
+                    text.extend(metadata_text);
+                }
             }
         }
 
         let info = Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL).title("File Info"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("File Info".bold()),
+            )
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false });
 
