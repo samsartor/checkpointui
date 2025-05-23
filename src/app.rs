@@ -270,7 +270,18 @@ impl App {
                 .split(chunks[1]);
 
             self.render_tree_panel(f, main_chunks[0]);
-            self.render_info_panel(f, main_chunks[1]);
+            
+            // Split info panel into two vertical sections
+            let info_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(50), // Selected item info
+                    Constraint::Percentage(50), // File info
+                ])
+                .split(main_chunks[1]);
+            
+            self.render_selected_info_panel(f, info_chunks[0]);
+            self.render_file_info_panel(f, info_chunks[1]);
         } else {
             let help_text = "No file loaded.\n\nUsage: checkpointui <safetensors_file>\n\nPress 'q' or Esc to quit";
             let help = Paragraph::new(help_text)
@@ -370,7 +381,7 @@ impl App {
         f.render_stateful_widget(list, area, &mut *tree.list_state.borrow_mut());
     }
 
-    fn render_info_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+    fn render_selected_info_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         use std::fmt::Write;
 
         let Some(tree) = &self.tree_state else { return };
@@ -379,12 +390,13 @@ impl App {
             .borrow()
             .selected()
             .and_then(|i| tree.visible_items.get(i));
+        
         let mut info_text = String::new();
-        if let Some(item) = selected_item {
+        let title = if let Some(item) = selected_item {
             if let Some(tensor_info) = &item.info.tensor_info {
                 writeln!(
                     &mut info_text,
-                    "Tensor: {}\nShape: {:?}\nData Type: {:?}\nParameters: {}\nSize: {}",
+                    "Name: {}\nShape: {:?}\nData Type: {:?}\nParameters: {}\nSize: {}",
                     item.info.full_name,
                     tensor_info.shape,
                     tensor_info.dtype,
@@ -392,22 +404,37 @@ impl App {
                     self.format_bytes(tensor_info.data_offsets.1 - tensor_info.data_offsets.0),
                 )
                 .unwrap();
+                "Tensor Info"
             } else {
                 writeln!(
                     &mut info_text,
-                    "Module: {}\nTensors: {}\nParameters: {}",
+                    "Name: {}\nTensors: {}\nParameters: {}",
                     item.info.full_name,
                     item.info.total_tensors,
                     self.format_count(item.info.total_params),
                 )
                 .unwrap();
+                "Module Info"
             }
-        }
+        } else {
+            info_text.push_str("No item selected");
+            "Selection Info"
+        };
 
-        if !info_text.is_empty() {
-            writeln!(&mut info_text).unwrap();
-        }
+        let info = Paragraph::new(info_text)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false });
 
+        f.render_widget(info, area);
+    }
+
+    fn render_file_info_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        use std::fmt::Write;
+
+        let Some(tree) = &self.tree_state else { return };
+        
+        let mut info_text = String::new();
         writeln!(
             &mut info_text,
             "File: {}\nTotal Tensors: {}\nTotal Parameters: {}",
@@ -422,14 +449,14 @@ impl App {
         if self.extra_metadata.is_some() {
             if let Ok(mut text) = ansi_to_tui::IntoText::into_text(&self.formatted_extra) {
                 if let Some(first) = text.lines.get_mut(0) {
-                    first.spans.insert(0, "Metadata: ".into());
+                    first.spans.insert(0, "\n\nMetadata:\n".into());
                     info_text.extend(text);
                 }
             }
         }
 
         let info = Paragraph::new(info_text)
-            .block(Block::default().borders(Borders::ALL).title("Information"))
+            .block(Block::default().borders(Borders::ALL).title("File Info"))
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false });
 
