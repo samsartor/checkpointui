@@ -1,4 +1,5 @@
 use anyhow::Error;
+use human_format::{Formatter, Scales};
 use owning_ref::ArcRef;
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode};
 use ratatui::crossterm::execute;
@@ -17,6 +18,7 @@ use ratatui::{
 };
 use std::collections::HashSet;
 use std::io::{Stdout, stdout};
+use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -29,16 +31,17 @@ pub struct App {
     file_path: Option<PathBuf>,
     tree_state: Option<TreeState>,
     safetensors_metadata: Option<Metadata>,
+    count_formatter: Formatter,
+    bytes_formatter: Formatter,
 }
 
 struct TreeState {
     current_path: Vec<Key>,
+    path_history: Vec<Vec<Key>>,
     expanded: HashSet<Vec<Key>>,
-    selected_index: usize,
     visible_items: Vec<TreeItem>,
     data: ArcRef<ModuleInfo>,
     list_state: ListState,
-    scroll_state: ScrollbarState,
 }
 
 #[derive(Clone)]
@@ -64,12 +67,11 @@ impl TreeState {
     fn new(data: ArcRef<ModuleInfo>) -> Self {
         Self {
             current_path: Vec::new(),
+            path_history: Vec::new(),
             expanded: HashSet::new(),
-            selected_index: 0,
             visible_items: Vec::new(),
             data,
             list_state: ListState::default(),
-            scroll_state: ScrollbarState::new(0),
         }
     }
 
@@ -90,13 +92,6 @@ impl TreeState {
         }
 
         self.build_visible_items(current_module, self.current_path.clone(), 0);
-
-        if self.selected_index >= self.visible_items.len() {
-            self.selected_index = self.visible_items.len().saturating_sub(1);
-        }
-
-        self.list_state.select(Some(self.selected_index));
-        self.scroll_state = ScrollbarState::new(self.visible_items.len().saturating_sub(1));
     }
 
     fn build_visible_items(&mut self, module: ArcRef<ModuleInfo>, path: Vec<Key>, depth: usize) {
@@ -122,61 +117,74 @@ impl TreeState {
     }
 
     fn toggle_expanded(&mut self) {
-        if let Some(item) = self.visible_items.get(self.selected_index) {
-            if item.has_children() {
-                if self.expanded.contains(&item.path) {
-                    self.expanded.remove(&item.path);
-                } else {
-                    self.expanded.insert(item.path.clone());
-                }
-            }
+        let Some(index) = self.list_state.selected() else {
+            return;
+        };
+        let Some(item) = self.visible_items.get(index) else {
+            return;
+        };
+        if !item.has_children() {
+            return;
+        }
+        if self.expanded.contains(&item.path) {
+            self.expanded.remove(&item.path);
+        } else {
+            self.expanded.insert(item.path.clone());
         }
     }
 
     fn move_up(&mut self) {
-        if self.selected_index > 0 {
-            self.selected_index -= 1;
-            self.list_state.select(Some(self.selected_index));
-            self.scroll_state = self.scroll_state.position(self.selected_index);
-        }
+        self.list_state.select_previous();
     }
 
     fn move_down(&mut self) {
-        if self.selected_index < self.visible_items.len().saturating_sub(1) {
-            self.selected_index += 1;
-            self.list_state.select(Some(self.selected_index));
-            self.scroll_state = self.scroll_state.position(self.selected_index);
-        }
+        self.list_state.select_next();
     }
 
     fn move_right(&mut self) {
-        if let Some(item) = self.visible_items.get(self.selected_index) {
-            if item.has_children() {
-                // Navigate into the module
-                self.current_path = item.path.clone();
-                self.selected_index = 0;
-                self.rebuild_visible_items();
-            }
+        let Some(index) = self.list_state.selected() else {
+            return;
+        };
+        let Some(item) = self.visible_items.get(index) else {
+            return;
+        };
+        if !item.has_children() {
+            return;
         }
+        let prev_path = mem::replace(&mut self.current_path, item.path.clone());
+        self.path_history.push(prev_path);
+        self.rebuild_visible_items();
+        self.list_state.select(Some(0));
     }
 
     fn move_left(&mut self) {
-        if !self.current_path.is_empty() {
-            // Navigate up to parent module
-            self.current_path.pop();
-            self.selected_index = 0;
-            self.rebuild_visible_items();
-        }
+        let goto_path = self.path_history.pop().unwrap_or_default();
+        let prev_path = mem::replace(&mut self.current_path, goto_path);
+        self.rebuild_visible_items();
+        let index = self.visible_items.iter().position(|i| i.path == prev_path);
+        self.list_state.select(index);
     }
 }
 
 impl App {
     pub fn new() -> Self {
+        let mut count_formatter = Formatter::new();
+        let mut count_scales = Scales::new();
+        count_scales
+            .with_base(1000)
+            .with_suffixes(vec!["", "K", "M", "B", "T"]);
+        count_formatter.with_separator("").with_scales(count_scales);
+        let mut bytes_formatter = Formatter::new();
+        bytes_formatter
+            .with_scales(Scales::Binary())
+            .with_units("B");
         Self {
             should_quit: false,
             file_path: None,
             tree_state: None,
             safetensors_metadata: None,
+            count_formatter,
+            bytes_formatter,
         }
     }
 
@@ -249,7 +257,6 @@ impl App {
                 .split(chunks[1]);
 
             self.render_tree_panel(f, main_chunks[0]);
-            self.render_scrollbar(f, main_chunks[0]);
             self.render_info_panel(f, main_chunks[1]);
         } else {
             let help_text = "No file loaded.\n\nUsage: checkpointui <safetensors_file>\n\nPress 'q' or Esc to quit";
@@ -273,7 +280,7 @@ impl App {
     }
 
     fn render_tree_panel(&mut self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        let Some(tree) = &mut self.tree_state else {
+        let Some(tree) = &self.tree_state else {
             return;
         };
         let items: Vec<ListItem> = tree
@@ -294,7 +301,7 @@ impl App {
                     indent,
                     icon,
                     item.name,
-                    human_format::Formatter::new().format(item.info.total_params as f64)
+                    self.format_count(item.info.total_params),
                 );
                 ListItem::new(text)
             })
@@ -319,37 +326,55 @@ impl App {
             .style(Style::default().fg(Color::White))
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
 
-        StatefulWidget::render(list, area, f.buffer_mut(), &mut tree.list_state);
+        let tree = self.tree_state.as_mut().unwrap();
+        f.render_stateful_widget(list, area, &mut tree.list_state);
     }
 
     fn render_info_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        use std::fmt::Write;
+
         let Some(tree) = &self.tree_state else { return };
-        let selected_item = tree.visible_items.get(tree.selected_index);
-        let info_text = if let Some(item) = selected_item {
+        let selected_item = tree
+            .list_state
+            .selected()
+            .and_then(|i| tree.visible_items.get(i));
+        let mut info_text = String::new();
+        if let Some(item) = selected_item {
             if let Some(tensor_info) = &item.info.tensor_info {
-                format!(
-                    "Tensor: {}\n\nShape: {:?}\nData Type: {:?}\nParameters: {}\nSize: {} bytes",
+                writeln!(
+                    &mut info_text,
+                    "Tensor: {}\nShape: {:?}\nData Type: {:?}\nParameters: {}\nSize: {}",
                     item.info.full_name,
                     tensor_info.shape,
                     tensor_info.dtype,
-                    human_format::Formatter::new().format(item.info.total_params as f64),
-                    tensor_info.data_offsets.1 - tensor_info.data_offsets.0
+                    self.format_count(item.info.total_params),
+                    self.format_bytes(tensor_info.data_offsets.1 - tensor_info.data_offsets.0),
                 )
+                .unwrap();
             } else {
-                format!(
-                    "Module: {}\nParameters: {}",
+                writeln!(
+                    &mut info_text,
+                    "Module: {}\nTensors: {}\nParameters: {}",
                     item.info.full_name,
-                    human_format::Formatter::new().format(item.info.total_params as f64)
+                    item.info.total_tensors,
+                    self.format_count(item.info.total_params),
                 )
+                .unwrap();
             }
-        } else {
-            format!(
-                "File: {}\nTotal Tensors: {}\nTotal Parameters: {}",
-                self.file_path.as_ref().unwrap().display(),
-                tree.data.total_tensors,
-                human_format::Formatter::new().format(tree.data.total_params as f64)
-            )
-        };
+        }
+
+        if !info_text.is_empty() {
+            writeln!(&mut info_text).unwrap();
+        }
+
+        writeln!(
+            &mut info_text,
+            "File: {}\nTotal Tensors: {}\nTotal Parameters: {}",
+            self.file_path.as_ref().unwrap().display(),
+            tree.data.total_tensors,
+            self.format_count(tree.data.total_params)
+        )
+        .unwrap();
 
         let info = Paragraph::new(info_text)
             .block(Block::default().borders(Borders::ALL).title("Information"))
@@ -358,21 +383,20 @@ impl App {
         f.render_widget(info, area);
     }
 
-    fn render_scrollbar(&mut self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        let Some(tree) = &mut self.tree_state else {
-            return;
-        };
-        f.render_stateful_widget(
-            Scrollbar::default()
-                .orientation(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None),
-            area.inner(Margin {
-                vertical: 1,
-                horizontal: 0,
-            }),
-            &mut tree.scroll_state,
-        );
+    fn format_count(&self, count: usize) -> String {
+        if count < 1000 {
+            count.to_string()
+        } else {
+            self.count_formatter.format(count as f64)
+        }
+    }
+
+    fn format_bytes(&self, bytes: usize) -> String {
+        if bytes < 1000 {
+            format!("{bytes} Bytes")
+        } else {
+            self.bytes_formatter.format(bytes as f64)
+        }
     }
 }
 
