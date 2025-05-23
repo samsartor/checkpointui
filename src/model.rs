@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
-use safetensors::tensor::{SafeTensorError, TensorInfo};
+use safetensors::tensor::{Metadata, SafeTensorError, TensorInfo};
+use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::Read;
@@ -7,7 +8,6 @@ use std::path::Path;
 use std::{fmt, mem};
 
 const HEADER_MIB_LIMIT: usize = 100;
-pub type Metadata = safetensors::tensor::Metadata;
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Hash)]
 pub enum Key {
@@ -111,6 +111,42 @@ impl SafeTensorsData {
             header_size,
             tree,
         })
+    }
+
+    pub fn parse_metadata(&self) -> Value {
+        let mut map = serde_json::value::Map::new();
+        if let Some(meta) = self.metadata.metadata() {
+            for (k, v) in meta {
+                map.insert(
+                    k.clone(),
+                    match serde_json::from_str(v) {
+                        Ok(v) => v,
+                        Err(_) => Value::String(v.clone()),
+                    },
+                );
+            }
+        }
+        map.into()
+    }
+}
+
+pub fn shorten_value(value: &mut Value) {
+    use Value::*;
+    match value {
+        String(text) if text.len() > 10_000 || text.starts_with("data:image/") => {
+            *text = "...".to_string();
+        }
+        Array(values) => {
+            for value in values {
+                shorten_value(value);
+            }
+        }
+        Object(map) => {
+            for value in map.values_mut() {
+                shorten_value(value);
+            }
+        }
+        _ => (),
     }
 }
 

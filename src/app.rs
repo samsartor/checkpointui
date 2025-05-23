@@ -6,6 +6,8 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ratatui::text::{Line, Text};
+use ratatui::widgets::Wrap;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -16,13 +18,14 @@ use ratatui::{
         ScrollbarState, StatefulWidget,
     },
 };
+use serde_json::Value;
 use std::collections::HashSet;
 use std::io::{Stdout, stdout};
 use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::model::{Key, Metadata, ModuleInfo, SafeTensorsData};
+use crate::model::{Key, ModuleInfo, SafeTensorsData, shorten_value};
 
 pub type Backend = CrosstermBackend<Stdout>;
 
@@ -30,7 +33,8 @@ pub struct App {
     should_quit: bool,
     file_path: Option<PathBuf>,
     tree_state: Option<TreeState>,
-    safetensors_metadata: Option<Metadata>,
+    extra_metadata: Option<Value>,
+    formatted_extra: String,
     count_formatter: Formatter,
     bytes_formatter: Formatter,
 }
@@ -182,17 +186,25 @@ impl App {
             should_quit: false,
             file_path: None,
             tree_state: None,
-            safetensors_metadata: None,
+            extra_metadata: None,
+            formatted_extra: String::new(),
             count_formatter,
             bytes_formatter,
         }
     }
 
     pub fn load_file(&mut self, file_path: PathBuf) -> Result<(), Error> {
-        let SafeTensorsData { metadata, tree, .. } = SafeTensorsData::from_file(&file_path)?;
+        let data = SafeTensorsData::from_file(&file_path)?;
         self.file_path = Some(file_path);
-        self.safetensors_metadata = Some(metadata);
-        let mut state = TreeState::new(Arc::new(tree).into());
+        let mut extra_metadata = data.parse_metadata();
+        shorten_value(&mut extra_metadata);
+        if let Ok(formatted) =
+            colored_json::to_colored_json(&extra_metadata, colored_json::ColorMode::On)
+        {
+            self.formatted_extra = formatted;
+        }
+        self.extra_metadata = Some(extra_metadata);
+        let mut state = TreeState::new(Arc::new(data.tree).into());
         state.rebuild_visible_items();
         self.tree_state = Some(state);
         Ok(())
@@ -376,9 +388,21 @@ impl App {
         )
         .unwrap();
 
+        let mut info_text = Text::from(info_text);
+
+        if self.extra_metadata.is_some() {
+            if let Ok(mut text) = ansi_to_tui::IntoText::into_text(&self.formatted_extra) {
+                if let Some(first) = text.lines.get_mut(0) {
+                    first.spans.insert(0, "Metadata: ".into());
+                    info_text.extend(text);
+                }
+            }
+        }
+
         let info = Paragraph::new(info_text)
             .block(Block::default().borders(Borders::ALL).title("Information"))
-            .style(Style::default().fg(Color::White));
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false });
 
         f.render_widget(info, area);
     }
