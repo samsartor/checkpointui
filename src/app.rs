@@ -12,13 +12,14 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Margin},
-    style::{Color, Style},
+    style::{Color, Style, Stylize},
     widgets::{
         Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
         ScrollbarState, StatefulWidget,
     },
 };
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::io::{Stdout, stdout};
 use std::mem;
@@ -45,7 +46,7 @@ struct TreeState {
     expanded: HashSet<Vec<Key>>,
     visible_items: Vec<TreeItem>,
     data: ArcRef<ModuleInfo>,
-    list_state: ListState,
+    list_state: RefCell<ListState>,
 }
 
 #[derive(Clone)]
@@ -75,7 +76,7 @@ impl TreeState {
             expanded: HashSet::new(),
             visible_items: Vec::new(),
             data,
-            list_state: ListState::default(),
+            list_state: RefCell::new(ListState::default()),
         }
     }
 
@@ -121,7 +122,7 @@ impl TreeState {
     }
 
     fn toggle_expanded(&mut self) {
-        let Some(index) = self.list_state.selected() else {
+        let Some(index) = self.list_state.borrow().selected() else {
             return;
         };
         let Some(item) = self.visible_items.get(index) else {
@@ -138,15 +139,15 @@ impl TreeState {
     }
 
     fn move_up(&mut self) {
-        self.list_state.select_previous();
+        self.list_state.get_mut().select_previous();
     }
 
     fn move_down(&mut self) {
-        self.list_state.select_next();
+        self.list_state.get_mut().select_next();
     }
 
     fn move_right(&mut self) {
-        let Some(index) = self.list_state.selected() else {
+        let Some(index) = self.list_state.get_mut().selected() else {
             return;
         };
         let Some(item) = self.visible_items.get(index) else {
@@ -158,7 +159,7 @@ impl TreeState {
         let prev_path = mem::replace(&mut self.current_path, item.path.clone());
         self.path_history.push(prev_path);
         self.rebuild_visible_items();
-        self.list_state.select(Some(0));
+        self.list_state.get_mut().select(Some(0));
     }
 
     fn move_left(&mut self) {
@@ -166,7 +167,7 @@ impl TreeState {
         let prev_path = mem::replace(&mut self.current_path, goto_path);
         self.rebuild_visible_items();
         let index = self.visible_items.iter().position(|i| i.path == prev_path);
-        self.list_state.select(index);
+        self.list_state.get_mut().select(index);
     }
 }
 
@@ -295,27 +296,53 @@ impl App {
         let Some(tree) = &self.tree_state else {
             return;
         };
-        let items: Vec<ListItem> = tree
+
+        let lines: Vec<Line> = tree
             .visible_items
             .iter()
             .map(|item| {
-                let indent = "  ".repeat(item.depth);
-                let icon = if item.has_children() {
+                let mut spans = Vec::new();
+
+                // Indentation
+                if item.depth > 0 {
+                    spans.push("  ".repeat(item.depth).into());
+                }
+
+                // Icon
+                let icon_span = if item.has_children() {
                     if item.is_expanded { "▼ " } else { "▶ " }
                 } else if item.is_tensor() {
                     "📄 "
                 } else {
                     "  "
-                };
+                }
+                .into();
+                spans.push(icon_span);
 
-                let text = format!(
-                    "{}{}{} ({})",
-                    indent,
-                    icon,
-                    item.name,
-                    self.format_count(item.info.total_params),
-                );
-                ListItem::new(text)
+                // Name
+                let name_span = if item.is_tensor() {
+                    item.name.as_str().cyan()
+                } else if item.has_children() {
+                    item.name.as_str().blue().bold()
+                } else {
+                    item.name.as_str().white()
+                };
+                spans.push(name_span);
+
+                // Parameter count
+                let param_text = format!(" ({})", self.format_count(item.info.total_params));
+                spans.push(param_text.gray());
+
+                // Tensor details
+                if let Some(tensor_info) = &item.info.tensor_info {
+                    spans.push(format!(" {:?}", tensor_info.shape).white());
+                    spans.push(format!(" {:?}", tensor_info.dtype).yellow());
+                    let size =
+                        self.format_bytes(tensor_info.data_offsets.1 - tensor_info.data_offsets.0);
+                    spans.push(format!(" {}", size).magenta());
+                }
+
+                Line::from(spans)
             })
             .collect();
 
@@ -329,6 +356,8 @@ impl App {
                 .join(".")
         };
 
+        let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
+
         let list = List::new(items)
             .block(
                 Block::default()
@@ -338,8 +367,7 @@ impl App {
             .style(Style::default().fg(Color::White))
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
 
-        let tree = self.tree_state.as_mut().unwrap();
-        f.render_stateful_widget(list, area, &mut tree.list_state);
+        f.render_stateful_widget(list, area, &mut *tree.list_state.borrow_mut());
     }
 
     fn render_info_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
@@ -348,6 +376,7 @@ impl App {
         let Some(tree) = &self.tree_state else { return };
         let selected_item = tree
             .list_state
+            .borrow()
             .selected()
             .and_then(|i| tree.visible_items.get(i));
         let mut info_text = String::new();
