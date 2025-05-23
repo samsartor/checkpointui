@@ -382,8 +382,6 @@ impl App {
     }
 
     fn render_selected_info_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        use std::fmt::Write;
-
         let Some(tree) = &self.tree_state else { return };
         let selected_item = tree
             .list_state
@@ -391,37 +389,31 @@ impl App {
             .selected()
             .and_then(|i| tree.visible_items.get(i));
         
-        let mut info_text = String::new();
+        let mut text = Text::default();
         let title = if let Some(item) = selected_item {
             if let Some(tensor_info) = &item.info.tensor_info {
-                writeln!(
-                    &mut info_text,
-                    "Name: {}\nShape: {:?}\nData Type: {:?}\nParameters: {}\nSize: {}",
-                    item.info.full_name,
-                    tensor_info.shape,
-                    tensor_info.dtype,
-                    self.format_count(item.info.total_params),
-                    self.format_bytes(tensor_info.data_offsets.1 - tensor_info.data_offsets.0),
-                )
-                .unwrap();
+                text.extend(Text::from(vec![
+                    Line::from(vec!["Name: ".into(), item.info.full_name.cyan()]),
+                    Line::from(vec!["Shape: ".into(), format!("{:?}", tensor_info.shape).white()]),
+                    Line::from(vec!["Data Type: ".into(), format!("{:?}", tensor_info.dtype).yellow()]),
+                    Line::from(vec!["Parameters: ".into(), self.format_count(item.info.total_params).green()]),
+                    Line::from(vec!["Size: ".into(), self.format_bytes(tensor_info.data_offsets.1 - tensor_info.data_offsets.0).magenta()]),
+                ]));
                 "Tensor Info"
             } else {
-                writeln!(
-                    &mut info_text,
-                    "Name: {}\nTensors: {}\nParameters: {}",
-                    item.info.full_name,
-                    item.info.total_tensors,
-                    self.format_count(item.info.total_params),
-                )
-                .unwrap();
+                text.extend(Text::from(vec![
+                    Line::from(vec!["Name: ".into(), item.info.full_name.cyan()]),
+                    Line::from(vec!["Tensors: ".into(), item.info.total_tensors.to_string().white()]),
+                    Line::from(vec!["Parameters: ".into(), self.format_count(item.info.total_params).green()]),
+                ]));
                 "Module Info"
             }
         } else {
-            info_text.push_str("No item selected");
+            text.extend(Text::from("No item selected".gray()));
             "Selection Info"
         };
 
-        let info = Paragraph::new(info_text)
+        let info = Paragraph::new(text)
             .block(Block::default().borders(Borders::ALL).title(title))
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false });
@@ -430,32 +422,30 @@ impl App {
     }
 
     fn render_file_info_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        use std::fmt::Write;
-
         let Some(tree) = &self.tree_state else { return };
         
-        let mut info_text = String::new();
-        writeln!(
-            &mut info_text,
-            "File: {}\nTotal Tensors: {}\nTotal Parameters: {}",
-            self.file_path.as_ref().unwrap().display(),
-            tree.data.total_tensors,
-            self.format_count(tree.data.total_params)
-        )
-        .unwrap();
+        let mut text = Text::default();
+        
+        // File info section
+        text.extend(Text::from(vec![
+            Line::from(vec!["File: ".into(), self.file_path.as_ref().unwrap().display().to_string().cyan()]),
+            Line::from(vec!["Total Tensors: ".into(), tree.data.total_tensors.to_string().white()]),
+            Line::from(vec!["Total Parameters: ".into(), self.format_count(tree.data.total_params).green()]),
+        ]));
 
-        let mut info_text = Text::from(info_text);
-
+        // Add metadata section if available
         if self.extra_metadata.is_some() {
-            if let Ok(mut text) = ansi_to_tui::IntoText::into_text(&self.formatted_extra) {
-                if let Some(first) = text.lines.get_mut(0) {
-                    first.spans.insert(0, "\n\nMetadata:\n".into());
-                    info_text.extend(text);
-                }
+            text.extend(Text::from(vec![
+                Line::from(""),
+                Line::from("Metadata:".yellow().bold()),
+            ]));
+            
+            if let Ok(metadata_text) = ansi_to_tui::IntoText::into_text(&self.formatted_extra) {
+                text.extend(metadata_text);
             }
         }
 
-        let info = Paragraph::new(info_text)
+        let info = Paragraph::new(text)
             .block(Block::default().borders(Borders::ALL).title("File Info"))
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false });
