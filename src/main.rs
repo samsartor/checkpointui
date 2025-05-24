@@ -10,6 +10,13 @@ use std::path::PathBuf;
 struct Cli {
     #[arg(help = "Path to the safetensors file")]
     file_path: Option<PathBuf>,
+    #[arg(
+        help = "The character which separates modules in tensor paths",
+        short = 'd',
+        long,
+        default_value_t = '.'
+    )]
+    module_delim: char,
 }
 
 fn main() -> Result<(), anyhow::Error> {
@@ -18,6 +25,7 @@ fn main() -> Result<(), anyhow::Error> {
     let mut terminal = app::setup_terminal()?;
     let mut app = app::App::new();
     app.helptext = Cli::command().render_long_help().to_string();
+    app.module_delim = cli.module_delim;
 
     if let Some(file_path) = cli.file_path {
         if let Err(e) = app.load_file(file_path) {

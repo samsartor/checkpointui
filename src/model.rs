@@ -13,7 +13,7 @@ const HEADER_MIB_LIMIT: usize = 100;
 pub enum Key {
     Name(String),
     Index(u64),
-    Cons(Box<Key>, Box<Key>),
+    Cons(Box<Key>, char, Box<Key>),
 }
 
 impl Key {}
@@ -23,7 +23,7 @@ impl fmt::Display for Key {
         match self {
             Key::Name(n) => fmt::Display::fmt(n, f),
             Key::Index(i) => fmt::Display::fmt(i, f),
-            Key::Cons(a, b) => write!(f, "{}.{}", a, b),
+            Key::Cons(a, d, b) => write!(f, "{}{}{}", a, d, b),
         }
     }
 }
@@ -48,12 +48,12 @@ impl ModuleInfo {
         }
     }
 
-    pub fn build(tensors: HashMap<String, &TensorInfo>) -> Result<Self> {
+    pub fn build(tensors: HashMap<String, &TensorInfo>, module_delim: char) -> Result<Self> {
         let mut root = ModuleInfo::new("".to_string());
 
         for (name, info) in tensors {
             let params = info.shape.iter().copied().product::<usize>();
-            let parts: Vec<&str> = name.split('.').collect();
+            let parts: Vec<&str> = name.split(module_delim).collect();
             let mut current = &mut root;
             current.total_params += params;
             current.total_tensors += 1;
@@ -79,16 +79,16 @@ impl ModuleInfo {
         Ok(root)
     }
 
-    pub fn flatten_single_children(&mut self) {
+    pub fn flatten_single_children(&mut self, module_delim: char) {
         self.children = mem::take(&mut self.children)
             .into_iter()
             .map(|(k, mut v)| {
-                v.flatten_single_children();
+                v.flatten_single_children(module_delim);
                 if v.children.len() != 1 {
                     return (k, v);
                 }
                 let (ck, cv) = v.children.into_iter().next().unwrap();
-                (Key::Cons(Box::new(k), Box::new(ck)), cv)
+                (Key::Cons(Box::new(k), module_delim, Box::new(ck)), cv)
             })
             .collect();
     }
@@ -101,10 +101,10 @@ pub struct SafeTensorsData {
 }
 
 impl SafeTensorsData {
-    pub fn from_file(file_path: &Path) -> Result<Self> {
+    pub fn from_file(file_path: &Path, module_delim: char) -> Result<Self> {
         let (header_size, metadata) = read_metadata_from_file(file_path)?;
-        let mut tree = ModuleInfo::build(metadata.tensors())?;
-        tree.flatten_single_children();
+        let mut tree = ModuleInfo::build(metadata.tensors(), module_delim)?;
+        tree.flatten_single_children(module_delim);
 
         Ok(Self {
             metadata,

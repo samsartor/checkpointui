@@ -65,6 +65,7 @@ pub struct App {
     bytes_formatter: Formatter,
     selected_panel: Panel,
     pub helptext: String,
+    pub module_delim: char,
 }
 
 struct TreeState {
@@ -215,7 +216,7 @@ impl App {
     }
 
     pub fn load_file(&mut self, file_path: PathBuf) -> Result<(), Error> {
-        let data = SafeTensorsData::from_file(&file_path)?;
+        let data = SafeTensorsData::from_file(&file_path, self.module_delim)?;
         self.file_path = Some(file_path);
         let mut extra_metadata = data.parse_metadata();
         shorten_value(&mut extra_metadata);
@@ -383,13 +384,14 @@ impl App {
 
         let mut title: Line = "Module Tree".into();
         if !tree.current_path.is_empty() {
+            let mut delim_bytes = [0u8; 8];
             title += " - ".into();
             title += tree
                 .current_path
                 .iter()
                 .map(|k| k.to_string())
                 .collect::<Vec<_>>()
-                .join(".")
+                .join(self.module_delim.encode_utf8(&mut delim_bytes))
                 .fg(MODULE_FG)
         };
 
