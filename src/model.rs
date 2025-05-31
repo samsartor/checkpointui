@@ -152,7 +152,6 @@ pub struct ModuleInfo {
     pub children: BTreeMap<Key, ModuleInfo>,
     pub total_tensors: u64,
     pub total_params: u64,
-    pub fake_root: bool,
 }
 
 impl ModuleInfo {
@@ -163,7 +162,6 @@ impl ModuleInfo {
             children: BTreeMap::new(),
             total_tensors: 0,
             total_params: 0,
-            fake_root: false,
         }
     }
 
@@ -173,7 +171,7 @@ impl ModuleInfo {
     ) -> Self {
         let mut root = ModuleInfo::default();
 
-        for (name, info) in tensors {
+        for (name, info) in tensors.into_iter() {
             let params = info.shape.iter().copied().product::<u64>();
 
             let parts = split.split(name.into());

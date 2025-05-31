@@ -57,7 +57,7 @@ impl<I: Read + Seek> ModuleSource for Safetensors<I> {
                 .ok_or(anyhow!("tensor ends before start"))? as usize
         ];
         self.io.read_exact(&mut data)?;
-        return Ok(data);
+        Ok(data)
     }
 }
 

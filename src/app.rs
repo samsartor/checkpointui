@@ -1,5 +1,6 @@
 use anyhow::Error;
 use human_format::{Formatter, Scales};
+use lexical_sort::natural_lexical_cmp;
 use owning_ref::ArcRef;
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode};
 use ratatui::crossterm::execute;
@@ -107,16 +108,24 @@ impl TreeState {
         }
     }
 
-    fn build_visible_items(&mut self) {
+    fn rebuild_visible_items(&mut self) {
         self.visible_items.clear();
         let mut stack = vec![(self.data.clone(), "".to_string(), -1)];
         while let Some((info, name, depth)) = stack.pop() {
             let is_expanded = depth < 0 || self.expanded.contains(&info.full_name);
             if is_expanded {
+                let stack_at = stack.len();
                 for key in info.children.keys() {
                     let child = info.clone().map(|m| &m.children[key]);
                     stack.push((child, key.to_string(), depth + 1));
                 }
+                stack[stack_at..].sort_by(|(a_info, a_name, ..), (b_info, b_name, ..)| {
+                    a_info
+                        .tensor_info
+                        .is_some()
+                        .cmp(&b_info.tensor_info.is_some())
+                        .then(natural_lexical_cmp(b_name, a_name))
+                });
             }
             if depth >= 0 {
                 self.visible_items.push(TreeItem {
@@ -166,7 +175,7 @@ impl TreeState {
         }
         let prev_data = mem::replace(&mut self.data, item.info.clone());
         self.data_history.push(prev_data);
-        self.build_visible_items();
+        self.rebuild_visible_items();
         self.list_state.get_mut().select(Some(0));
     }
 
@@ -175,7 +184,7 @@ impl TreeState {
             return;
         };
         let prev_data = mem::replace(&mut self.data, goto_data);
-        self.build_visible_items();
+        self.rebuild_visible_items();
         let index = self
             .visible_items
             .iter()
@@ -221,7 +230,7 @@ impl App {
         }
         self.extra_metadata = Some(extra_metadata);
         let mut state = TreeState::new(Arc::new(module).into());
-        state.build_visible_items();
+        state.rebuild_visible_items();
         self.tree_state = Some(state);
         Ok(())
     }
@@ -239,7 +248,7 @@ impl App {
                 (KeyCode::Right, Panel::Tree, Some(s)) => s.move_right(),
                 (KeyCode::Char(' ') | KeyCode::Enter, Panel::Tree, Some(s)) => {
                     s.toggle_expanded();
-                    s.build_visible_items();
+                    s.rebuild_visible_items();
                 }
 
                 // TODO: Add controls for other panels later
