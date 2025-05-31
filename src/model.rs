@@ -1,133 +1,219 @@
-use anyhow::{Result, bail};
-use safetensors::tensor::{Metadata, SafeTensorError, TensorInfo};
+use anyhow::Error;
+use owning_ref::ArcRef;
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
-use std::fs::File;
-use std::io::Read;
-use std::path::Path;
-use std::{fmt, mem};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::{cmp, fmt, hash, mem, ops};
 
-const HEADER_MIB_LIMIT: usize = 100;
-
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Hash)]
-pub enum Key {
-    Name(String),
-    Index(u64),
-    Cons(Box<Key>, char, Box<Key>),
+#[derive(Debug, Clone)]
+#[allow(non_camel_case_types)]
+pub enum TensorTy {
+    BOOL,
+    U8,
+    I8,
+    F8_E5M2,
+    F8_E4M3,
+    I16,
+    U16,
+    F16,
+    BF16,
+    F32,
+    F64,
+    I64,
+    U64,
+    Unknown(String),
 }
 
-impl Key {}
-
-impl fmt::Display for Key {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Key::Name(n) => fmt::Display::fmt(n, f),
-            Key::Index(i) => fmt::Display::fmt(i, f),
-            Key::Cons(a, d, b) => write!(f, "{}{}{}", a, d, b),
-        }
+impl fmt::Display for TensorTy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use TensorTy::*;
+        let text = match self {
+            BOOL => "BOOL",
+            U8 => "U8",
+            I8 => "I8",
+            F8_E5M2 => "F8_E5M2",
+            F8_E4M3 => "F8_E4M3",
+            I16 => "I16",
+            U16 => "U16",
+            F16 => "F16",
+            BF16 => "BF16",
+            F32 => "F32",
+            F64 => "F64",
+            I64 => "I64",
+            U64 => "U64",
+            Unknown(text) => text,
+        };
+        write!(f, "{}", text,)
     }
 }
 
-#[derive(Default)]
+#[derive(Debug)]
+pub enum TensorSeek {
+    InFile { start: u64, end: u64 },
+}
+
+#[derive(Debug)]
+pub struct TensorInfo {
+    pub ty: TensorTy,
+    pub shape: Vec<u64>,
+    pub size: u64,
+    pub seek: TensorSeek,
+}
+
+pub enum TensorReadError {
+    Unsupported(TensorTy),
+}
+
+fn convertbytes<T, O>(bytes: &[u8], map: impl Fn(T) -> O) -> Vec<O>
+where
+    T: zerocopy::AsBytes + zerocopy::FromBytes,
+{
+    let stride = std::mem::size_of::<T>();
+    let len = bytes.len() / stride;
+    let mut out = Vec::with_capacity(len);
+    let mut i = 0;
+    while i < bytes.len() {
+        let mut this: T = T::new_zeroed();
+        this.as_bytes_mut().copy_from_slice(&bytes[i..][..stride]);
+        out.push(map(this));
+        i += stride;
+    }
+    out
+}
+
+impl TensorInfo {
+    pub fn read_f32(&self, bytes: &[u8]) -> Result<Vec<f32>, TensorReadError> {
+        use TensorTy::*;
+        Ok(match &self.ty {
+            F32 => convertbytes::<f32, _>(bytes, |x| x),
+            F64 => convertbytes::<f64, _>(bytes, |x| x as f32),
+            F16 => convertbytes::<half::f16, _>(bytes, |x| x.into()),
+            BF16 => convertbytes::<half::bf16, _>(bytes, |x| x.into()),
+            F8_E4M3 => convertbytes::<float8::F8E4M3, _>(bytes, |x| x.into()),
+            F8_E5M2 => convertbytes::<float8::F8E5M2, _>(bytes, |x| x.into()),
+            other => return Err(TensorReadError::Unsupported(other.clone())),
+        })
+    }
+
+    pub fn read_f64(&self, bytes: &[u8]) -> Result<Vec<f64>, TensorReadError> {
+        use TensorTy::*;
+        Ok(match &self.ty {
+            F32 => convertbytes::<f32, _>(bytes, |x| x as f64),
+            F64 => convertbytes::<f64, _>(bytes, |x| x),
+            F16 => convertbytes::<half::f16, _>(bytes, |x| x.into()),
+            BF16 => convertbytes::<half::bf16, _>(bytes, |x| x.into()),
+            F8_E4M3 => convertbytes::<float8::F8E4M3, _>(bytes, |x| x.into()),
+            F8_E5M2 => convertbytes::<float8::F8E5M2, _>(bytes, |x| x.into()),
+            other => return Err(TensorReadError::Unsupported(other.clone())),
+        })
+    }
+}
+
+pub enum PathSplit {
+    Delim(char),
+}
+
+impl Default for PathSplit {
+    fn default() -> Self {
+        PathSplit::Delim('.')
+    }
+}
+
+impl PathSplit {
+    pub fn split(&self, fullname: Arc<str>) -> Vec<Key> {
+        let mut parts = Vec::new();
+        let mut at = 0;
+        match self {
+            &PathSplit::Delim(d) => {
+                while let Some(off) = fullname[at..].find(d) {
+                    parts.push(Key {
+                        full: fullname.clone(),
+                        start: at,
+                        end: at + off,
+                    });
+                    at += off;
+                    at += 1;
+                }
+            }
+        }
+        parts.push(Key {
+            full: fullname.clone(),
+            start: at,
+            end: fullname.len(),
+        });
+        parts
+    }
+}
+
+#[derive(Default, Debug)]
 pub struct ModuleInfo {
-    pub full_name: String,
+    pub full_name: Key,
     pub tensor_info: Option<TensorInfo>,
     pub children: BTreeMap<Key, ModuleInfo>,
-    pub total_tensors: usize,
-    pub total_params: usize,
+    pub total_tensors: u64,
+    pub total_params: u64,
+    pub fake_root: bool,
 }
 
 impl ModuleInfo {
-    pub fn new(full_name: String) -> Self {
+    pub fn new(full_name: Key) -> Self {
         Self {
             full_name,
             tensor_info: None,
             children: BTreeMap::new(),
             total_tensors: 0,
             total_params: 0,
+            fake_root: false,
         }
     }
 
-    pub fn build(tensors: HashMap<String, &TensorInfo>, module_delim: char) -> Result<Self> {
-        let mut root = ModuleInfo::new("".to_string());
+    pub fn build_from_tensors(
+        tensors: impl IntoIterator<Item = (String, TensorInfo)>,
+        split: &PathSplit,
+    ) -> Self {
+        let mut root = ModuleInfo::default();
 
         for (name, info) in tensors {
-            let params = info.shape.iter().copied().product::<usize>();
-            let parts: Vec<&str> = name.split(module_delim).collect();
+            let params = info.shape.iter().copied().product::<u64>();
+
+            let parts = split.split(name.into());
             let mut current = &mut root;
             current.total_params += params;
             current.total_tensors += 1;
 
-            for (i, &part) in parts.iter().enumerate() {
-                let key = match part.parse() {
-                    Ok(i) => Key::Index(i),
-                    Err(_) => Key::Name(part.to_string()),
-                };
+            for key in parts {
                 current = current
                     .children
-                    .entry(key)
-                    .or_insert_with(|| ModuleInfo::new(name.clone()));
+                    .entry(key.clone())
+                    .or_insert_with(|| ModuleInfo::new(key.absolute()));
                 current.total_params += params;
                 current.total_tensors += 1;
-
-                if i == parts.len() - 1 {
-                    current.tensor_info = Some(info.clone());
-                }
             }
+            current.tensor_info = Some(info);
         }
 
-        Ok(root)
+        root
     }
 
-    pub fn flatten_single_children(&mut self, module_delim: char) {
+    pub fn flatten_single_children(&mut self) {
         self.children = mem::take(&mut self.children)
             .into_iter()
             .map(|(k, mut v)| {
-                v.flatten_single_children(module_delim);
+                v.flatten_single_children();
                 if v.children.len() != 1 {
                     return (k, v);
                 }
                 let (ck, cv) = v.children.into_iter().next().unwrap();
-                (Key::Cons(Box::new(k), module_delim, Box::new(ck)), cv)
+                (k.join(ck), cv)
             })
             .collect();
     }
 }
 
-pub struct SafeTensorsData {
-    pub metadata: Metadata,
-    pub header_size: usize,
-    pub tree: ModuleInfo,
-}
-
-impl SafeTensorsData {
-    pub fn from_file(file_path: &Path, module_delim: char) -> Result<Self> {
-        let (header_size, metadata) = read_metadata_from_file(file_path)?;
-        let mut tree = ModuleInfo::build(metadata.tensors(), module_delim)?;
-        tree.flatten_single_children(module_delim);
-
-        Ok(Self {
-            metadata,
-            header_size,
-            tree,
-        })
-    }
-
-    pub fn parse_metadata(&self) -> Value {
-        let mut map = serde_json::value::Map::new();
-        if let Some(meta) = self.metadata.metadata() {
-            for (k, v) in meta {
-                map.insert(
-                    k.clone(),
-                    match serde_json::from_str(v) {
-                        Ok(v) => v,
-                        Err(_) => Value::String(v.clone()),
-                    },
-                );
-            }
-        }
-        map.into()
-    }
+pub trait ModuleSource {
+    fn module(&mut self, split: &PathSplit) -> Result<ModuleInfo, Error>;
+    fn metadata(&mut self) -> Result<Value, Error>;
+    fn tensor(&mut self, seek: TensorSeek) -> Result<Vec<u8>, Error>;
 }
 
 pub fn shorten_value(value: &mut Value) {
@@ -150,28 +236,85 @@ pub fn shorten_value(value: &mut Value) {
     }
 }
 
-fn read_metadata_from_file(file_path: &Path) -> Result<(usize, Metadata)> {
-    let mut file = File::open(file_path)?;
+#[derive(Clone, Debug)]
+pub struct Key {
+    full: Arc<str>,
+    start: usize,
+    end: usize,
+}
 
-    let mut header_size_bytes = [0u8; 8];
-    file.read_exact(&mut header_size_bytes)?;
-    let n = u64::from_le_bytes(header_size_bytes) as usize;
-
-    if n > HEADER_MIB_LIMIT * 1024 * 1024 {
-        bail!(
-            "Header is larger than {HEADER_MIB_LIMIT}MiB. Is {} a safetensors file?",
-            file_path.display()
-        );
+impl Key {
+    pub fn absolute(mut self) -> Self {
+        self.start = 0;
+        self
     }
 
-    let mut metadata_bytes = vec![0u8; n];
-    file.read_exact(&mut metadata_bytes)?;
+    pub fn join(&self, mut child: Key) -> Self {
+        assert_eq!(self.full[..self.end], child.full[..self.end]);
+        child.start = self.start;
+        child
+    }
+}
 
-    let metadata_str =
-        std::str::from_utf8(&metadata_bytes).map_err(|_| SafeTensorError::InvalidHeader)?;
+impl ops::Deref for Key {
+    type Target = str;
 
-    let metadata: Metadata = serde_json::from_str(metadata_str)
-        .map_err(|_| SafeTensorError::InvalidHeaderDeserialization)?;
+    fn deref(&self) -> &str {
+        &self.full[self.start..self.end]
+    }
+}
 
-    Ok((n, metadata))
+impl From<Key> for ArcRef<str> {
+    fn from(Key { full, start, end }: Key) -> Self {
+        ArcRef::from(full).map(|s| &s[start..end])
+    }
+}
+
+impl fmt::Display for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        <str as fmt::Display>::fmt(self, f)
+    }
+}
+
+impl cmp::PartialOrd for Key {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(<Self as cmp::Ord>::cmp(self, other))
+    }
+}
+
+impl cmp::Ord for Key {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        <str as cmp::Ord>::cmp(self, other)
+        /*match (self.parse::<u64>(), other.parse::<u64>()) {
+            (Some(a), Some(b)) => <str as cmp::Ord>::cmp(self, other),
+            (None, Some(_)) => cmp::Ordering::Less,
+            (Some(_), None) => cmp::Ordering::Greater,
+            (None, None) => <str as cmp::Ord>::cmp(self, other),
+        }*/
+    }
+}
+
+impl cmp::PartialEq for Key {
+    fn eq(&self, other: &Self) -> bool {
+        (Arc::ptr_eq(&self.full, &other.full) && self.start == other.start && self.end == other.end)
+            || <str as cmp::PartialEq>::eq(self, other)
+    }
+}
+
+impl cmp::Eq for Key {}
+
+impl hash::Hash for Key {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        <str as hash::Hash>::hash(self, state)
+    }
+}
+
+impl Default for Key {
+    fn default() -> Self {
+        Key {
+            full: Arc::from(""),
+            start: 0,
+            end: 0,
+        }
+    }
 }

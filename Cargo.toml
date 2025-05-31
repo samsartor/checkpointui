@@ -8,6 +8,8 @@ ansi-to-tui = "7.0.0"
 anyhow = "1.0.98"
 clap = { version = "4.5.38", features = ["derive"] }
 colored_json = "5.0.0"
+float8 = { version = "0.2.1", features = ["zerocopy"] }
+half = { version = "=2.4.1", features = ["zerocopy"] }
 human_format = "1.1.0"
 owning_ref = "0.4.1"
 ratatui = "0.29.0"
@@ -15,3 +17,4 @@ regex = "1.11.1"
 safetensors = "0.5.3"
 serde_json = "1.0.140"
 tui-scrollview = "0.5.1"
+zerocopy = "0.6"

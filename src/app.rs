@@ -6,7 +6,7 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{
@@ -15,14 +15,15 @@ use ratatui::widgets::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 use serde_json::Value;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::io::{Stdout, stdout};
 use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tui_scrollview::{ScrollView, ScrollViewState};
 
-use crate::model::{Key, ModuleInfo, SafeTensorsData, shorten_value};
+use crate::model::{Key, ModuleInfo, ModuleSource, PathSplit, shorten_value};
+use crate::safetensors::Safetensors;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 enum Panel {
@@ -60,28 +61,27 @@ pub struct App {
     file_path: Option<PathBuf>,
     tree_state: Option<TreeState>,
     extra_metadata: Option<Value>,
+    source: Option<Box<dyn ModuleSource>>,
     formatted_extra: String,
     count_formatter: Formatter,
     bytes_formatter: Formatter,
     selected_panel: Panel,
     pub helptext: String,
-    pub module_delim: char,
+    pub path_split: PathSplit,
 }
 
 struct TreeState {
-    current_path: Vec<Key>,
-    path_history: Vec<Vec<Key>>,
-    expanded: HashSet<Vec<Key>>,
-    visible_items: Vec<TreeItem>,
     data: ArcRef<ModuleInfo>,
+    data_history: Vec<ArcRef<ModuleInfo>>,
+    expanded: HashSet<Key>,
+    visible_items: Vec<TreeItem>,
     list_state: RefCell<ListState>,
 }
 
 #[derive(Clone)]
 struct TreeItem {
-    path: Vec<Key>,
     name: String,
-    depth: usize,
+    depth: i32,
     is_expanded: bool,
     info: ArcRef<ModuleInfo>,
 }
@@ -97,54 +97,34 @@ impl TreeItem {
 }
 
 impl TreeState {
-    fn new(data: ArcRef<ModuleInfo>) -> Self {
+    fn new(root: ArcRef<ModuleInfo>) -> Self {
         Self {
-            current_path: Vec::new(),
-            path_history: Vec::new(),
+            data: root,
+            data_history: Vec::new(),
             expanded: HashSet::new(),
             visible_items: Vec::new(),
-            data,
             list_state: RefCell::new(ListState::default()),
         }
     }
 
-    fn rebuild_visible_items(&mut self) {
+    fn build_visible_items(&mut self) {
         self.visible_items.clear();
-
-        // Navigate to current module
-        let mut current_module = self.data.clone();
-        for key in &self.current_path {
-            if current_module.children.contains_key(key) {
-                current_module = current_module.map(|m| &m.children[key]);
-            } else {
-                // Path no longer exists, reset to root
-                self.current_path.clear();
-                current_module = self.data.clone();
-                break;
-            }
-        }
-
-        self.build_visible_items(current_module, self.current_path.clone(), 0);
-    }
-
-    fn build_visible_items(&mut self, module: ArcRef<ModuleInfo>, path: Vec<Key>, depth: usize) {
-        for key in module.children.keys() {
-            let info = module.clone().map(|m| &m.children[key]);
-            let mut item_path = path.clone();
-            item_path.push(key.clone());
-
-            let is_expanded = self.expanded.contains(&item_path);
-
-            self.visible_items.push(TreeItem {
-                path: item_path.clone(),
-                name: key.to_string(),
-                depth,
-                is_expanded,
-                info: info.clone(),
-            });
-
+        let mut stack = vec![(self.data.clone(), "".to_string(), -1)];
+        while let Some((info, name, depth)) = stack.pop() {
+            let is_expanded = depth < 0 || self.expanded.contains(&info.full_name);
             if is_expanded {
-                self.build_visible_items(info, item_path, depth + 1);
+                for key in info.children.keys() {
+                    let child = info.clone().map(|m| &m.children[key]);
+                    stack.push((child, key.to_string(), depth + 1));
+                }
+            }
+            if depth >= 0 {
+                self.visible_items.push(TreeItem {
+                    name,
+                    depth,
+                    is_expanded,
+                    info,
+                });
             }
         }
     }
@@ -159,10 +139,10 @@ impl TreeState {
         if !item.has_children() {
             return;
         }
-        if self.expanded.contains(&item.path) {
-            self.expanded.remove(&item.path);
+        if self.expanded.contains(&item.info.full_name) {
+            self.expanded.remove(&item.info.full_name);
         } else {
-            self.expanded.insert(item.path.clone());
+            self.expanded.insert(item.info.full_name.clone());
         }
     }
 
@@ -184,17 +164,22 @@ impl TreeState {
         if !item.has_children() {
             return;
         }
-        let prev_path = mem::replace(&mut self.current_path, item.path.clone());
-        self.path_history.push(prev_path);
-        self.rebuild_visible_items();
+        let prev_data = mem::replace(&mut self.data, item.info.clone());
+        self.data_history.push(prev_data);
+        self.build_visible_items();
         self.list_state.get_mut().select(Some(0));
     }
 
     fn move_left(&mut self) {
-        let goto_path = self.path_history.pop().unwrap_or_default();
-        let prev_path = mem::replace(&mut self.current_path, goto_path);
-        self.rebuild_visible_items();
-        let index = self.visible_items.iter().position(|i| i.path == prev_path);
+        let Some(goto_data) = self.data_history.pop() else {
+            return;
+        };
+        let prev_data = mem::replace(&mut self.data, goto_data);
+        self.build_visible_items();
+        let index = self
+            .visible_items
+            .iter()
+            .position(|i| std::ptr::eq(&*i.info, &*prev_data));
         self.list_state.get_mut().select(index);
     }
 }
@@ -216,9 +201,18 @@ impl App {
     }
 
     pub fn load_file(&mut self, file_path: PathBuf) -> Result<(), Error> {
-        let data = SafeTensorsData::from_file(&file_path, self.module_delim)?;
+        self.source = Some(Box::new(Safetensors::open_file(&file_path)?));
         self.file_path = Some(file_path);
-        let mut extra_metadata = data.parse_metadata();
+        self.rebuild_module()
+    }
+
+    pub fn rebuild_module(&mut self) -> Result<(), Error> {
+        let Some(data) = &mut self.source else {
+            return Ok(());
+        };
+        let mut module = data.module(&self.path_split)?;
+        module.flatten_single_children();
+        let mut extra_metadata = data.metadata()?;
         shorten_value(&mut extra_metadata);
         if let Ok(formatted) =
             colored_json::to_colored_json(&extra_metadata, colored_json::ColorMode::On)
@@ -226,8 +220,8 @@ impl App {
             self.formatted_extra = formatted;
         }
         self.extra_metadata = Some(extra_metadata);
-        let mut state = TreeState::new(Arc::new(data.tree).into());
-        state.rebuild_visible_items();
+        let mut state = TreeState::new(Arc::new(module).into());
+        state.build_visible_items();
         self.tree_state = Some(state);
         Ok(())
     }
@@ -245,7 +239,7 @@ impl App {
                 (KeyCode::Right, Panel::Tree, Some(s)) => s.move_right(),
                 (KeyCode::Char(' ') | KeyCode::Enter, Panel::Tree, Some(s)) => {
                     s.toggle_expanded();
-                    s.rebuild_visible_items();
+                    s.build_visible_items();
                 }
 
                 // TODO: Add controls for other panels later
@@ -341,7 +335,7 @@ impl App {
 
                 // Indentation
                 if item.depth > 0 {
-                    spans.push("  ".repeat(item.depth).into());
+                    spans.push("  ".repeat(item.depth as usize).into());
                 }
 
                 // Icon
@@ -372,9 +366,8 @@ impl App {
                 // Tensor details
                 if let Some(tensor_info) = &item.info.tensor_info {
                     spans.push(format!(" {:?}", tensor_info.shape).fg(SHAPE_FG));
-                    spans.push(format!(" {:?}", tensor_info.dtype).fg(DTYPE_FG));
-                    let size =
-                        self.format_bytes(tensor_info.data_offsets.1 - tensor_info.data_offsets.0);
+                    spans.push(format!(" {}", tensor_info.ty).fg(DTYPE_FG));
+                    let size = self.format_bytes(tensor_info.size);
                     spans.push(format!(" {}", size).fg(BYTESIZE_FG));
                 }
 
@@ -383,16 +376,9 @@ impl App {
             .collect();
 
         let mut title: Line = "Module Tree".into();
-        if !tree.current_path.is_empty() {
-            let mut delim_bytes = [0u8; 8];
+        if !tree.data.full_name.is_empty() {
             title += " - ".into();
-            title += tree
-                .current_path
-                .iter()
-                .map(|k| k.to_string())
-                .collect::<Vec<_>>()
-                .join(self.module_delim.encode_utf8(&mut delim_bytes))
-                .fg(MODULE_FG)
+            title += tree.data.full_name.fg(MODULE_FG)
         };
 
         let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
@@ -415,17 +401,14 @@ impl App {
         let mut text = Text::default();
         let title = if let Some(item) = selected_item {
             if let Some(tensor_info) = &item.info.tensor_info {
-                text.push_line(vec![
-                    "Path: ".bold(),
-                    item.info.full_name.as_str().fg(TENSOR_FG),
-                ]);
+                text.push_line(vec!["Path: ".bold(), item.info.full_name.fg(TENSOR_FG)]);
                 text.push_line(vec![
                     "Shape: ".bold(),
                     format!("{:?}", tensor_info.shape).fg(SHAPE_FG),
                 ]);
                 text.push_line(vec![
                     "Data Type: ".bold(),
-                    format!("{:?}", tensor_info.dtype).fg(DTYPE_FG),
+                    format!("{:?}", tensor_info.ty).fg(DTYPE_FG),
                 ]);
                 text.push_line(vec![
                     "Parameters: ".bold(),
@@ -433,15 +416,11 @@ impl App {
                 ]);
                 text.push_line(vec![
                     "Size: ".bold(),
-                    self.format_bytes(tensor_info.data_offsets.1 - tensor_info.data_offsets.0)
-                        .fg(BYTESIZE_FG),
+                    self.format_bytes(tensor_info.size).fg(BYTESIZE_FG),
                 ]);
                 "Tensor Info"
             } else {
-                text.push_line(vec![
-                    "Path: ".bold(),
-                    item.info.full_name.as_str().fg(MODULE_FG),
-                ]);
+                text.push_line(vec!["Path: ".bold(), item.info.full_name.fg(MODULE_FG)]);
                 text.push_line(vec![
                     "Tensors: ".bold(),
                     item.info.total_tensors.to_string().fg(COUNT_FG),
@@ -523,7 +502,7 @@ impl App {
             .title(title)
     }
 
-    fn format_count(&self, count: usize) -> String {
+    fn format_count(&self, count: u64) -> String {
         if count < 1000 {
             count.to_string()
         } else {
@@ -531,7 +510,7 @@ impl App {
         }
     }
 
-    fn format_bytes(&self, bytes: usize) -> String {
+    fn format_bytes(&self, bytes: u64) -> String {
         if bytes < 1000 {
             format!("{bytes} Bytes")
         } else {

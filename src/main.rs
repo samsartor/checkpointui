@@ -1,5 +1,6 @@
 mod app;
 mod model;
+mod safetensors;
 
 use clap::{CommandFactory as _, Parser};
 use std::path::PathBuf;
@@ -25,7 +26,7 @@ fn main() -> Result<(), anyhow::Error> {
     let mut terminal = app::setup_terminal()?;
     let mut app = app::App::new();
     app.helptext = Cli::command().render_long_help().to_string();
-    app.module_delim = cli.module_delim;
+    app.path_split = model::PathSplit::Delim(cli.module_delim);
 
     if let Some(file_path) = cli.file_path {
         if let Err(e) = app.load_file(file_path) {
