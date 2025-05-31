@@ -21,9 +21,8 @@ use std::io::{Stdout, stdout};
 use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tui_scrollview::{ScrollView, ScrollViewState};
 
-use crate::model::{Key, ModuleInfo, ModuleSource, PathSplit, shorten_value};
+use crate::model::{Key, ModuleInfo, ModuleSource, PathSplit, TensorInfo, shorten_value};
 use crate::safetensors::Safetensors;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -32,6 +31,7 @@ enum Panel {
     Tree,
     SelectedInfo,
     FileInfo,
+    Analysis,
 }
 
 impl Panel {
@@ -39,7 +39,8 @@ impl Panel {
         match self {
             Panel::Tree => Panel::SelectedInfo,
             Panel::SelectedInfo => Panel::FileInfo,
-            Panel::FileInfo => Panel::Tree,
+            Panel::FileInfo => Panel::Analysis,
+            Panel::Analysis => Panel::Tree,
         }
     }
 }
@@ -251,7 +252,8 @@ impl App {
                     s.rebuild_visible_items();
                 }
 
-                // TODO: Add controls for other panels later
+                // Analysis panel controls (currently read-only)
+                (_, Panel::Analysis, _) => {}
                 _ => {}
             }
         }
@@ -290,27 +292,57 @@ impl App {
 
         // Main content area
         if self.tree_state.is_some() {
-            let main_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(50), // Tree panel
-                    Constraint::Percentage(50), // Info panel
-                ])
-                .split(chunks[1]);
+            let should_show_analysis = self.should_show_analysis_panel();
+            
+            if should_show_analysis {
+                // Three-panel layout when tensor is selected
+                let main_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Percentage(33), // Tree panel
+                        Constraint::Percentage(33), // Info panel
+                        Constraint::Percentage(34), // Analysis panel
+                    ])
+                    .split(chunks[1]);
 
-            self.render_tree_panel(f, main_chunks[0]);
+                self.render_tree_panel(f, main_chunks[0]);
 
-            // Split info panel into two vertical sections
-            let info_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(50), // Selected item info
-                    Constraint::Percentage(50), // File info
-                ])
-                .split(main_chunks[1]);
+                // Split info panel into two vertical sections
+                let info_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Percentage(50), // Selected item info
+                        Constraint::Percentage(50), // File info
+                    ])
+                    .split(main_chunks[1]);
 
-            self.render_selected_info_panel(f, info_chunks[0]);
-            self.render_file_info_panel(f, info_chunks[1]);
+                self.render_selected_info_panel(f, info_chunks[0]);
+                self.render_file_info_panel(f, info_chunks[1]);
+                self.render_analysis_panel(f, main_chunks[2]);
+            } else {
+                // Two-panel layout when module is selected
+                let main_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Percentage(50), // Tree panel
+                        Constraint::Percentage(50), // Info panel
+                    ])
+                    .split(chunks[1]);
+
+                self.render_tree_panel(f, main_chunks[0]);
+
+                // Split info panel into two vertical sections
+                let info_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Percentage(50), // Selected item info
+                        Constraint::Percentage(50), // File info
+                    ])
+                    .split(main_chunks[1]);
+
+                self.render_selected_info_panel(f, info_chunks[0]);
+                self.render_file_info_panel(f, info_chunks[1]);
+            }
         } else {
             let help = Paragraph::new(self.helptext.as_str())
                 .block(Block::default().borders(Borders::ALL).title("Help"))
@@ -525,6 +557,216 @@ impl App {
         } else {
             self.bytes_formatter.format(bytes as f64)
         }
+    }
+
+    fn should_show_analysis_panel(&self) -> bool {
+        let Some(tree) = &self.tree_state else { return false };
+        let selected_item = tree
+            .list_state
+            .borrow()
+            .selected()
+            .and_then(|i| tree.visible_items.get(i));
+        
+        selected_item.map_or(false, |item| item.is_tensor())
+    }
+
+    fn render_analysis_panel(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        let tensor_info = {
+            let Some(tree) = &self.tree_state else { return };
+            let selected_item = tree
+                .list_state
+                .borrow()
+                .selected()
+                .and_then(|i| tree.visible_items.get(i));
+
+            let Some(item) = selected_item else {
+                return;
+            };
+
+            let Some(tensor_info) = &item.info.tensor_info else {
+                return;
+            };
+            
+            tensor_info.clone()
+        };
+
+        let analysis_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(50), // Histogram
+                Constraint::Percentage(50), // Singular values (if 2D)
+            ])
+            .split(area);
+
+        self.render_histogram(f, analysis_chunks[0], &tensor_info);
+        
+        if tensor_info.shape.len() == 2 {
+            self.render_singular_values(f, analysis_chunks[1], &tensor_info);
+        } else {
+            let placeholder = Paragraph::new("Singular values only available for 2D tensors")
+                .block(self.format_block("Singular Values", Panel::Analysis))
+                .style(Style::default().fg(Color::Gray));
+            f.render_widget(placeholder, analysis_chunks[1]);
+        }
+    }
+
+    fn render_histogram(&mut self, f: &mut ratatui::Frame, area: Rect, tensor_info: &TensorInfo) {
+        let mut text = Text::default();
+        
+        if let Some(source) = &mut self.source {
+            match source.tensor_f32((*tensor_info).clone()) {
+                Ok(data) => {
+                    let histogram = self.calculate_histogram(&data, 20);
+                    
+                    text.push_line(vec!["Data range: ".bold(), format!("{:.3} to {:.3}", 
+                        data.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+                        data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b))
+                    ).into()]);
+                    text.push_line(Line::from(""));
+                    
+                    for (i, (range_start, range_end, count)) in histogram.iter().enumerate() {
+                        let bar_len = (*count as f32 / histogram.iter().map(|(_, _, c)| *c).max().unwrap_or(1) as f32 * 30.0) as usize;
+                        let bar = "█".repeat(bar_len);
+                        text.push_line(vec![
+                            format!("{:6.2}-{:6.2}: ", range_start, range_end).into(),
+                            bar.fg(Color::Blue),
+                            format!(" ({})", count).into()
+                        ]);
+                    }
+                }
+                Err(e) => {
+                    text.push_line(vec!["Error loading tensor data: ".fg(Color::Red), format!("{}", e).into()]);
+                }
+            }
+        } else {
+            text.push_line(Line::from("No data source available"));
+        }
+
+        let histogram_widget = Paragraph::new(text)
+            .block(self.format_block("Histogram", Panel::Analysis))
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false });
+
+        f.render_widget(histogram_widget, area);
+    }
+
+    fn render_singular_values(&mut self, f: &mut ratatui::Frame, area: Rect, tensor_info: &TensorInfo) {
+        let mut text = Text::default();
+        
+        if let Some(source) = &mut self.source {
+            match source.tensor_f32((*tensor_info).clone()) {
+                Ok(data) => {
+                    let rows = tensor_info.shape[0] as usize;
+                    let cols = tensor_info.shape[1] as usize;
+                    
+                    if data.len() == rows * cols {
+                        match self.calculate_singular_values(&data, rows, cols) {
+                            Ok(singular_values) => {
+                                text.push_line(vec!["Matrix shape: ".bold(), format!("{}×{}", rows, cols).into()]);
+                                text.push_line(vec!["Rank (approx): ".bold(), 
+                                    singular_values.iter().filter(|&&x| x > 1e-6).count().to_string().into()]);
+                                text.push_line(Line::from(""));
+                                
+                                text.push_line("Top 10 singular values:".bold());
+                                for (i, &sv) in singular_values.iter().take(10).enumerate() {
+                                    let bar_len = (sv / singular_values[0] * 20.0) as usize;
+                                    let bar = "█".repeat(bar_len.max(1));
+                                    text.push_line(vec![
+                                        format!("{:2}: ", i + 1).into(),
+                                        bar.fg(Color::Green),
+                                        format!(" {:.4}", sv).into()
+                                    ]);
+                                }
+                            }
+                            Err(e) => {
+                                text.push_line(vec!["SVD error: ".fg(Color::Red), format!("{}", e).into()]);
+                            }
+                        }
+                    } else {
+                        text.push_line("Data size mismatch with tensor shape".fg(Color::Red));
+                    }
+                }
+                Err(e) => {
+                    text.push_line(vec!["Error loading tensor data: ".fg(Color::Red), format!("{}", e).into()]);
+                }
+            }
+        } else {
+            text.push_line(Line::from("No data source available"));
+        }
+
+        let svd_widget = Paragraph::new(text)
+            .block(self.format_block("Singular Values", Panel::Analysis))
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false });
+
+        f.render_widget(svd_widget, area);
+    }
+
+    fn calculate_histogram(&self, data: &[f32], bins: usize) -> Vec<(f32, f32, usize)> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        
+        let min = data.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+        let max = data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+        
+        if min == max {
+            return vec![(min, max, data.len())];
+        }
+        
+        let bin_width = (max - min) / bins as f32;
+        let mut histogram = vec![0; bins];
+        
+        for &value in data {
+            let bin = ((value - min) / bin_width).floor() as usize;
+            let bin = bin.min(bins - 1);
+            histogram[bin] += 1;
+        }
+        
+        histogram
+            .into_iter()
+            .enumerate()
+            .map(|(i, count)| {
+                let range_start = min + i as f32 * bin_width;
+                let range_end = min + (i + 1) as f32 * bin_width;
+                (range_start, range_end, count)
+            })
+            .collect()
+    }
+
+    fn calculate_singular_values(&self, data: &[f32], rows: usize, cols: usize) -> Result<Vec<f32>, Error> {
+        // Simple SVD implementation using power iteration for demonstration
+        // For a production implementation, you'd want to use a proper linear algebra library
+        let mut matrix: Vec<Vec<f32>> = vec![vec![0.0; cols]; rows];
+        
+        for (i, &value) in data.iter().enumerate() {
+            let row = i / cols;
+            let col = i % cols;
+            if row < rows && col < cols {
+                matrix[row][col] = value;
+            }
+        }
+        
+        // Compute A^T * A for eigenvalue decomposition
+        let mut ata = vec![vec![0.0; cols]; cols];
+        for i in 0..cols {
+            for j in 0..cols {
+                let mut sum = 0.0;
+                for k in 0..rows {
+                    sum += matrix[k][i] * matrix[k][j];
+                }
+                ata[i][j] = sum;
+            }
+        }
+        
+        // Extract diagonal values as rough approximation of singular values
+        let mut singular_values: Vec<f32> = ata.iter().enumerate()
+            .map(|(i, row)| row[i].sqrt())
+            .collect();
+        
+        singular_values.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        
+        Ok(singular_values)
     }
 }
 

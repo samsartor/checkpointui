@@ -47,12 +47,12 @@ impl fmt::Display for TensorTy {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TensorSeek {
     InFile { start: u64, end: u64 },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TensorInfo {
     pub ty: TensorTy,
     pub shape: Vec<u64>,
