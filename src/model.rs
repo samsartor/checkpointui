@@ -1,4 +1,4 @@
-use anyhow::Error;
+use anyhow::{Error, bail};
 use owning_ref::ArcRef;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -60,11 +60,41 @@ pub struct TensorInfo {
     pub seek: TensorSeek,
 }
 
-pub enum TensorReadError {
-    Unsupported(TensorTy),
+pub trait ByteOrder {
+    const IS_NATIVE: bool;
+
+    fn toggle_native(bytes: &mut [u8]) {
+        if !Self::IS_NATIVE {
+            bytes.reverse();
+        }
+    }
 }
 
-fn convertbytes<T, O>(bytes: &[u8], map: impl Fn(T) -> O) -> Vec<O>
+pub enum LE {}
+
+impl ByteOrder for LE {
+    #[cfg(target_endian = "big")]
+    const IS_NATIVE: bool = false;
+    #[cfg(target_endian = "little")]
+    const IS_NATIVE: bool = true;
+}
+
+pub enum BE {}
+
+impl ByteOrder for BE {
+    #[cfg(target_endian = "big")]
+    const IS_NATIVE: bool = true;
+    #[cfg(target_endian = "little")]
+    const IS_NATIVE: bool = false;
+}
+
+pub enum NE {}
+
+impl ByteOrder for NE {
+    const IS_NATIVE: bool = true;
+}
+
+fn convertbytes<T, S, O: ByteOrder>(bytes: &[u8], map: impl Fn(T) -> S) -> Vec<S>
 where
     T: zerocopy::AsBytes + zerocopy::FromBytes,
 {
@@ -74,7 +104,9 @@ where
     let mut i = 0;
     while i < bytes.len() {
         let mut this: T = T::new_zeroed();
-        this.as_bytes_mut().copy_from_slice(&bytes[i..][..stride]);
+        let dest = this.as_bytes_mut();
+        dest.copy_from_slice(&bytes[i..][..stride]);
+        O::toggle_native(dest);
         out.push(map(this));
         i += stride;
     }
@@ -82,29 +114,29 @@ where
 }
 
 impl TensorInfo {
-    pub fn read_f32(&self, bytes: &[u8]) -> Result<Vec<f32>, TensorReadError> {
+    pub fn read_f32<O: ByteOrder>(&self, bytes: &[u8]) -> Result<Vec<f32>, Error> {
         use TensorTy::*;
         Ok(match &self.ty {
-            F32 => convertbytes::<f32, _>(bytes, |x| x),
-            F64 => convertbytes::<f64, _>(bytes, |x| x as f32),
-            F16 => convertbytes::<half::f16, _>(bytes, |x| x.into()),
-            BF16 => convertbytes::<half::bf16, _>(bytes, |x| x.into()),
-            F8_E4M3 => convertbytes::<float8::F8E4M3, _>(bytes, |x| x.into()),
-            F8_E5M2 => convertbytes::<float8::F8E5M2, _>(bytes, |x| x.into()),
-            other => return Err(TensorReadError::Unsupported(other.clone())),
+            F32 => convertbytes::<f32, _, O>(bytes, |x| x),
+            F64 => convertbytes::<f64, _, O>(bytes, |x| x as f32),
+            F16 => convertbytes::<half::f16, _, O>(bytes, |x| x.into()),
+            BF16 => convertbytes::<half::bf16, _, O>(bytes, |x| x.into()),
+            F8_E4M3 => convertbytes::<float8::F8E4M3, _, O>(bytes, |x| x.into()),
+            F8_E5M2 => convertbytes::<float8::F8E5M2, _, O>(bytes, |x| x.into()),
+            other => bail!("unsupported tensor type {other:?}"),
         })
     }
 
-    pub fn read_f64(&self, bytes: &[u8]) -> Result<Vec<f64>, TensorReadError> {
+    pub fn read_f64<O: ByteOrder>(&self, bytes: &[u8]) -> Result<Vec<f64>, Error> {
         use TensorTy::*;
         Ok(match &self.ty {
-            F32 => convertbytes::<f32, _>(bytes, |x| x as f64),
-            F64 => convertbytes::<f64, _>(bytes, |x| x),
-            F16 => convertbytes::<half::f16, _>(bytes, |x| x.into()),
-            BF16 => convertbytes::<half::bf16, _>(bytes, |x| x.into()),
-            F8_E4M3 => convertbytes::<float8::F8E4M3, _>(bytes, |x| x.into()),
-            F8_E5M2 => convertbytes::<float8::F8E5M2, _>(bytes, |x| x.into()),
-            other => return Err(TensorReadError::Unsupported(other.clone())),
+            F32 => convertbytes::<f32, _, O>(bytes, |x| x as f64),
+            F64 => convertbytes::<f64, _, O>(bytes, |x| x),
+            F16 => convertbytes::<half::f16, _, O>(bytes, |x| x.into()),
+            BF16 => convertbytes::<half::bf16, _, O>(bytes, |x| x.into()),
+            F8_E4M3 => convertbytes::<float8::F8E4M3, _, O>(bytes, |x| x.into()),
+            F8_E5M2 => convertbytes::<float8::F8E5M2, _, O>(bytes, |x| x.into()),
+            other => bail!("unsupported tensor type {other:?}"),
         })
     }
 }
@@ -211,7 +243,8 @@ impl ModuleInfo {
 pub trait ModuleSource {
     fn module(&mut self, split: &PathSplit) -> Result<ModuleInfo, Error>;
     fn metadata(&mut self) -> Result<Value, Error>;
-    fn tensor(&mut self, seek: TensorSeek) -> Result<Vec<u8>, Error>;
+    fn tensor_f32(&mut self, tensor: TensorInfo) -> Result<Vec<f32>, Error>;
+    fn tensor_f64(&mut self, tensor: TensorInfo) -> Result<Vec<f64>, Error>;
 }
 
 pub fn shorten_value(value: &mut Value) {

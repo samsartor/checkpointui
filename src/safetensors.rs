@@ -1,14 +1,13 @@
-use crate::model::{ModuleInfo, ModuleSource, PathSplit, TensorInfo, TensorSeek, TensorTy};
+use crate::model::{LE, ModuleInfo, ModuleSource, PathSplit, TensorInfo, TensorSeek, TensorTy};
 use anyhow::{Error, Result, anyhow, bail};
 use safetensors::{SafeTensorError, tensor::Metadata};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{Read, Seek};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub struct Safetensors<I> {
     io: I,
-    path: PathBuf,
     metadata: Metadata,
 }
 
@@ -17,7 +16,21 @@ impl Safetensors<File> {
         let path = path.as_ref().to_path_buf();
         let mut io = File::open(&path)?;
         let metadata = read_metadata(&mut io, &path)?;
-        Ok(Safetensors { io, path, metadata })
+        Ok(Safetensors { io, metadata })
+    }
+}
+
+impl<I: Read + Seek> Safetensors<I> {
+    fn tensor_bytes(&mut self, seek: &TensorSeek) -> Result<Vec<u8>> {
+        let &TensorSeek::InFile { start, end } = seek;
+        self.io.seek(std::io::SeekFrom::Start(start))?;
+        let mut data = vec![
+            0;
+            end.checked_sub(start)
+                .ok_or(anyhow!("tensor ends before start"))? as usize
+        ];
+        self.io.read_exact(&mut data)?;
+        Ok(data)
     }
 }
 
@@ -48,16 +61,12 @@ impl<I: Read + Seek> ModuleSource for Safetensors<I> {
         Ok(map.into())
     }
 
-    fn tensor(&mut self, seek: TensorSeek) -> Result<Vec<u8>> {
-        let TensorSeek::InFile { start, end } = seek;
-        self.io.seek(std::io::SeekFrom::Start(start))?;
-        let mut data = vec![
-            0;
-            end.checked_sub(start)
-                .ok_or(anyhow!("tensor ends before start"))? as usize
-        ];
-        self.io.read_exact(&mut data)?;
-        Ok(data)
+    fn tensor_f32(&mut self, tensor: TensorInfo) -> std::result::Result<Vec<f32>, Error> {
+        tensor.read_f32::<LE>(&self.tensor_bytes(&tensor.seek)?)
+    }
+
+    fn tensor_f64(&mut self, tensor: TensorInfo) -> std::result::Result<Vec<f64>, Error> {
+        tensor.read_f64::<LE>(&self.tensor_bytes(&tensor.seek)?)
     }
 }
 
