@@ -11,6 +11,7 @@ colored_json = "5.0.0"
 float8 = { version = "0.2.1", features = ["zerocopy"] }
 half = { version = "=2.4.1", features = ["zerocopy"] }
 human_format = "1.1.0"
+json5 = "0.4.1"
 lexical-sort = "0.3.1"
 owning_ref = "0.4.1"
 ratatui = "0.29.0"

@@ -51,7 +51,7 @@ impl<I: Read + Seek> ModuleSource for Safetensors<I> {
             for (k, v) in meta {
                 map.insert(
                     k.clone(),
-                    match serde_json::from_str(v) {
+                    match json5::from_str(v) {
                         Ok(v) => v,
                         Err(_) => Value::String(v.clone()),
                     },
