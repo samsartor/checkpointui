@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::Path;
+use weakref::Ref;
 
 pub struct Safetensors<I> {
     io: I,
@@ -61,11 +62,19 @@ impl<I: Read + Seek> ModuleSource for Safetensors<I> {
         Ok(map.into())
     }
 
-    fn tensor_f32(&mut self, tensor: TensorInfo) -> std::result::Result<Vec<f32>, Error> {
+    fn tensor_f32(
+        &mut self,
+        tensor: TensorInfo,
+        cancel: Ref<()>,
+    ) -> std::result::Result<Vec<f32>, Error> {
         tensor.read_f32::<LE>(&self.tensor_bytes(&tensor.seek)?)
     }
 
-    fn tensor_f64(&mut self, tensor: TensorInfo) -> std::result::Result<Vec<f64>, Error> {
+    fn tensor_f64(
+        &mut self,
+        tensor: TensorInfo,
+        cancel: Ref<()>,
+    ) -> std::result::Result<Vec<f64>, Error> {
         tensor.read_f64::<LE>(&self.tensor_bytes(&tensor.seek)?)
     }
 }

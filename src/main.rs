@@ -1,3 +1,4 @@
+mod analysis;
 mod app;
 mod model;
 mod safetensors;

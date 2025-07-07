@@ -23,6 +23,7 @@ use std::io::{Stdout, stdout};
 use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::model::{Key, ModuleInfo, ModuleSource, PathSplit, TensorInfo, shorten_value};
 use crate::safetensors::Safetensors;
@@ -282,7 +283,9 @@ impl App {
     pub fn run(&mut self, terminal: &mut Terminal<Backend>) -> Result<(), Error> {
         while !self.should_quit {
             terminal.draw(|f| self.render_ui(f))?;
-            self.handle_events()?;
+            if event::poll(Duration::from_millis(100))? {
+                self.handle_events()?;
+            }
         }
         Ok(())
     }
@@ -633,7 +636,7 @@ impl App {
         let mut text = Text::default();
 
         if let Some(source) = &mut self.source {
-            match source.tensor_f32((*tensor_info).clone()) {
+            match source.tensor_f32((*tensor_info).clone(), Ref::null()) {
                 Ok(data) => {
                     let histogram = self.calculate_histogram(&data, 20);
 
@@ -688,7 +691,7 @@ impl App {
         let mut text = Text::default();
 
         if let Some(source) = &mut self.source {
-            match source.tensor_f32((*tensor_info).clone()) {
+            match source.tensor_f32((*tensor_info).clone(), Ref::null()) {
                 Ok(data) => {
                     let rows = tensor_info.shape[0] as usize;
                     let cols = tensor_info.shape[1] as usize;
