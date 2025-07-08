@@ -3,9 +3,7 @@ use crossbeam::channel::Sender;
 use human_format::{Formatter, Scales};
 use lexical_sort::natural_lexical_cmp;
 use owning_ref::ArcRef;
-use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode,
-};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -271,11 +269,11 @@ impl App {
         let mut state = TreeState::new(Arc::new(module).into());
         state.rebuild_visible_items();
         self.tree_state = Some(state);
-        
+
         // Now that we have the tree, move the source to the analysis thread
         let source = self.source.take().unwrap();
         self.analysis_sender = Some(start_analysis_thread(source));
-        
+
         // Start analysis for the initially selected tensor
         self.update_analysis_for_selected_tensor();
         Ok(())
@@ -687,40 +685,44 @@ impl App {
                         "Data range: ".bold(),
                         format!("{:.3} to {:.3}", histogram.min, histogram.max).into(),
                     ]);
-                    text.push_line(vec![
-                        "Display range: ".bold(),
-                        format!("{:.3} to {:.3}", histogram.left, histogram.right).into(),
-                    ]);
                     text.push_line(Line::from(""));
 
                     let max_count = histogram.bins.iter().max().cloned().unwrap_or(1);
-                    let bin_width = (histogram.right - histogram.left) / histogram.bins.len() as f32;
-                    
+                    let bin_width =
+                        (histogram.right - histogram.left) / histogram.bins.len() as f32;
+
                     for (i, &count) in histogram.bins.iter().enumerate() {
                         let range_start = histogram.left + i as f32 * bin_width;
                         let range_end = histogram.left + (i + 1) as f32 * bin_width;
                         let bar_len = (count as f32 / max_count as f32 * 30.0) as usize;
                         let bar = "█".repeat(bar_len);
-                        text.push_line(vec![
-                            format!("{:6.2}-{:6.2}: ", range_start, range_end).into(),
-                            bar.fg(Color::Blue),
-                            format!(" ({})", count).into(),
-                        ]);
+                        if i == 0 {
+                            text.push_line(vec![
+                                format!("       {range_end:6.2}: ").into(),
+                                bar.fg(Color::Blue),
+                                format!(" ({count})").into(),
+                            ]);
+                        } else if i + 1 == histogram.bins.len() {
+                            text.push_line(vec![
+                                format!("{range_start:6.2}       : ").into(),
+                                bar.fg(Color::Blue),
+                                format!(" ({count})").into(),
+                            ]);
+                        } else {
+                            text.push_line(vec![
+                                format!("{range_start:6.2} {range_end:6.2}: ").into(),
+                                bar.fg(Color::Blue),
+                                format!(" ({count})").into(),
+                            ]);
+                        }
                     }
                 } else if let Some(error) = analysis_data.error.get() {
-                    text.push_line(vec![
-                        "Error loading tensor data: ".fg(Color::Red),
-                        format!("{}", error).into(),
-                    ]);
+                    text.push_line(vec!["Error: ".fg(Color::Red), format!("{error}").into()]);
                 } else {
-                    text.push_line(vec![
-                        "🔄 Computing histogram...".fg(Color::Yellow),
-                    ]);
+                    text.push_line(vec!["🔄 Computing histogram...".fg(Color::Yellow)]);
                 }
             } else {
-                text.push_line(vec![
-                    "Analysis cancelled".fg(Color::Gray),
-                ]);
+                text.push_line(vec!["Analysis cancelled".fg(Color::Gray)]);
             }
         } else {
             text.push_line(Line::from("No analysis available"));
@@ -741,10 +743,8 @@ impl App {
         _tensor_info: &TensorInfo,
     ) {
         let mut text = Text::default();
-        
-        text.push_line(vec![
-            "🔄 Computing singular values...".fg(Color::Yellow),
-        ]);
+
+        text.push_line(vec!["🔄 Computing singular values...".fg(Color::Yellow)]);
 
         let svd_widget = Paragraph::new(text)
             .block(self.format_block("Singular Values", Panel::Analysis))
@@ -763,13 +763,18 @@ impl App {
             .and_then(|i| tree.visible_items.get(i));
 
         let Some(item) = selected_item else { return };
-        let Some(tensor_info) = &item.info.tensor_info else { return };
-        let Some(sender) = &self.analysis_sender else { return };
+        let Some(tensor_info) = &item.info.tensor_info else {
+            return;
+        };
+        let Some(sender) = &self.analysis_sender else {
+            return;
+        };
 
         let analysis = Own::new(Box::new(Analysis {
             tensor: tensor_info.clone(),
             histogram: std::sync::OnceLock::new(),
             error: std::sync::OnceLock::new(),
+            max_bin_count: 20,
         }));
 
         let analysis_ref = refer!(analysis);

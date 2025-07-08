@@ -1,6 +1,6 @@
 use anyhow::{Error, anyhow};
 use crossbeam::channel::{Receiver, Sender};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic;
 use std::sync::OnceLock;
 use weakref::{Ref, pin};
 
@@ -8,6 +8,7 @@ use crate::model::{ModuleSource, TensorInfo};
 
 pub struct Analysis {
     pub tensor: TensorInfo,
+    pub max_bin_count: usize,
     pub histogram: OnceLock<Histogram>,
     pub error: OnceLock<Error>,
 }
@@ -22,7 +23,7 @@ pub struct Histogram {
 
 const CHECK_EVERY: usize = 1024 * 1024;
 
-pub fn compute_histogram(mut data: Vec<f32>, out: Ref<OnceLock<Histogram>>) {
+pub fn compute_histogram(mut data: Vec<f32>, max_bin_count: usize, out: Ref<OnceLock<Histogram>>) {
     if data.is_empty() {
         let _ = out.get(&pin()).unwrap().set(Histogram {
             min: 0.0,
@@ -55,10 +56,11 @@ pub fn compute_histogram(mut data: Vec<f32>, out: Ref<OnceLock<Histogram>>) {
         left -= 0.15 * (right - left) / 0.8;
         right += 0.15 * (right - left) / 0.8;
     }
-    let bin_count = (data.len() / 5).clamp(5, 1000);
+    let bin_count = (data.len() / 5).clamp(5, max_bin_count);
     let mut bins = vec![0usize; bin_count];
     let bins_end = (bin_count - 1) as f32;
-    let scale = bins.len() as f32 / (right - left);
+    let mut scale = bins.len() as f32 / (right - left);
+    scale = if scale.is_finite() { scale } else { 1.0 };
     for x in data {
         if since_check >= CHECK_EVERY {
             assert!(out.is_alive());
@@ -82,22 +84,30 @@ pub fn compute_histogram(mut data: Vec<f32>, out: Ref<OnceLock<Histogram>>) {
 }
 
 fn do_analysis(source: &mut dyn ModuleSource, request: Ref<Analysis>) -> Result<(), Error> {
-    let (tensor, cancel, histogram) = {
+    let (tensor, max_bin_count, cancel, histogram) = {
         let guard = pin();
         let cancel = request.map_with(|_| &(), &guard);
         let histogram = request.map_with(|req| &req.histogram, &guard);
         let request = request.get(&guard).unwrap();
-        (request.tensor.clone(), cancel, histogram)
+        (
+            request.tensor.clone(),
+            request.max_bin_count,
+            cancel,
+            histogram,
+        )
     };
     let data = source.tensor_f32(tensor, cancel)?;
-    compute_histogram(data, histogram);
+    compute_histogram(data, max_bin_count, histogram);
     Ok(())
 }
 
 pub fn run_analysis_loop(mut source: Box<dyn ModuleSource>, requests: Receiver<Ref<Analysis>>) {
+    panic::set_hook(Box::new(|_| {}));
     loop {
         let Ok(request) = requests.recv() else { return };
-        match catch_unwind(AssertUnwindSafe(|| do_analysis(&mut *source, request))) {
+        match panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            do_analysis(&mut *source, request)
+        })) {
             Ok(Ok(_)) => (),
             Ok(Err(err)) => {
                 request.inspect(|r| {
