@@ -35,6 +35,8 @@ impl<I: Read + Seek> Safetensors<I> {
     }
 }
 
+unsafe impl<I: Read + Seek> Send for Safetensors<I> where I: Send {}
+
 impl<I: Read + Seek> ModuleSource for Safetensors<I> {
     fn module(&mut self, split: &PathSplit) -> Result<ModuleInfo> {
         let tensors = self.metadata.tensors();
@@ -65,7 +67,7 @@ impl<I: Read + Seek> ModuleSource for Safetensors<I> {
     fn tensor_f32(
         &mut self,
         tensor: TensorInfo,
-        cancel: Ref<()>,
+        _cancel: Ref<()>,
     ) -> std::result::Result<Vec<f32>, Error> {
         tensor.read_f32::<LE>(&self.tensor_bytes(&tensor.seek)?)
     }
@@ -73,7 +75,7 @@ impl<I: Read + Seek> ModuleSource for Safetensors<I> {
     fn tensor_f64(
         &mut self,
         tensor: TensorInfo,
-        cancel: Ref<()>,
+        _cancel: Ref<()>,
     ) -> std::result::Result<Vec<f64>, Error> {
         tensor.read_f64::<LE>(&self.tensor_bytes(&tensor.seek)?)
     }

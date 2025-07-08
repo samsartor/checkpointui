@@ -1,9 +1,10 @@
 use anyhow::Error;
+use crossbeam::channel::Sender;
 use human_format::{Formatter, Scales};
 use lexical_sort::natural_lexical_cmp;
 use owning_ref::ArcRef;
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode,
 };
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -24,7 +25,9 @@ use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use weakref::{Own, Ref, refer};
 
+use crate::analysis::{Analysis, start_analysis_thread};
 use crate::model::{Key, ModuleInfo, ModuleSource, PathSplit, TensorInfo, shorten_value};
 use crate::safetensors::Safetensors;
 
@@ -71,19 +74,40 @@ pub const DTYPE_FG: Color = Color::Yellow;
 pub const COUNT_FG: Color = Color::White;
 pub const BYTESIZE_FG: Color = Color::Magenta;
 
-#[derive(Default)]
 pub struct App {
     should_quit: bool,
     file_path: Option<PathBuf>,
     tree_state: Option<TreeState>,
     extra_metadata: Option<Value>,
-    source: Option<Box<dyn ModuleSource>>,
+    source: Option<Box<dyn ModuleSource + Send>>,
     formatted_extra: String,
     count_formatter: Formatter,
     bytes_formatter: Formatter,
     selected_panel: Panel,
     pub helptext: String,
     pub path_split: PathSplit,
+    analysis_sender: Option<Sender<Ref<Analysis>>>,
+    current_analysis: Option<Own<Box<Analysis>>>,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            should_quit: false,
+            file_path: None,
+            tree_state: None,
+            extra_metadata: None,
+            source: None,
+            formatted_extra: String::new(),
+            count_formatter: Formatter::default(),
+            bytes_formatter: Formatter::default(),
+            selected_panel: Panel::default(),
+            helptext: String::new(),
+            path_split: PathSplit::default(),
+            analysis_sender: None,
+            current_analysis: None,
+        }
+    }
 }
 
 struct TreeState {
@@ -247,6 +271,13 @@ impl App {
         let mut state = TreeState::new(Arc::new(module).into());
         state.rebuild_visible_items();
         self.tree_state = Some(state);
+        
+        // Now that we have the tree, move the source to the analysis thread
+        let source = self.source.take().unwrap();
+        self.analysis_sender = Some(start_analysis_thread(source));
+        
+        // Start analysis for the initially selected tensor
+        self.update_analysis_for_selected_tensor();
         Ok(())
     }
 
@@ -263,13 +294,26 @@ impl App {
                         self.selected_panel.prev(self.should_show_analysis_panel())
                 }
                 // Tree panel controls
-                (KeyCode::Up, Panel::Tree, Some(s)) => s.move_up(),
-                (KeyCode::Down, Panel::Tree, Some(s)) => s.move_down(),
-                (KeyCode::Left, Panel::Tree, Some(s)) => s.move_left(),
-                (KeyCode::Right, Panel::Tree, Some(s)) => s.move_right(),
+                (KeyCode::Up, Panel::Tree, Some(s)) => {
+                    s.move_up();
+                    self.update_analysis_for_selected_tensor();
+                }
+                (KeyCode::Down, Panel::Tree, Some(s)) => {
+                    s.move_down();
+                    self.update_analysis_for_selected_tensor();
+                }
+                (KeyCode::Left, Panel::Tree, Some(s)) => {
+                    s.move_left();
+                    self.update_analysis_for_selected_tensor();
+                }
+                (KeyCode::Right, Panel::Tree, Some(s)) => {
+                    s.move_right();
+                    self.update_analysis_for_selected_tensor();
+                }
                 (KeyCode::Char(' ') | KeyCode::Enter, Panel::Tree, Some(s)) => {
                     s.toggle_expanded();
                     s.rebuild_visible_items();
+                    self.update_analysis_for_selected_tensor();
                 }
 
                 // Analysis panel controls (currently read-only)
@@ -632,29 +676,30 @@ impl App {
         }
     }
 
-    fn render_histogram(&mut self, f: &mut ratatui::Frame, area: Rect, tensor_info: &TensorInfo) {
+    fn render_histogram(&mut self, f: &mut ratatui::Frame, area: Rect, _tensor_info: &TensorInfo) {
         let mut text = Text::default();
 
-        if let Some(source) = &mut self.source {
-            match source.tensor_f32((*tensor_info).clone(), Ref::null()) {
-                Ok(data) => {
-                    let histogram = self.calculate_histogram(&data, 20);
-
+        if let Some(analysis) = &self.current_analysis {
+            let analysis_ref = refer!(analysis);
+            if let Some(analysis_data) = analysis_ref.get(&weakref::pin()) {
+                if let Some(histogram) = analysis_data.histogram.get() {
                     text.push_line(vec![
                         "Data range: ".bold(),
-                        format!(
-                            "{:.3} to {:.3}",
-                            data.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-                            data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b))
-                        )
-                        .into(),
+                        format!("{:.3} to {:.3}", histogram.min, histogram.max).into(),
+                    ]);
+                    text.push_line(vec![
+                        "Display range: ".bold(),
+                        format!("{:.3} to {:.3}", histogram.left, histogram.right).into(),
                     ]);
                     text.push_line(Line::from(""));
 
-                    for (i, (range_start, range_end, count)) in histogram.iter().enumerate() {
-                        let bar_len = (*count as f32
-                            / histogram.iter().map(|(_, _, c)| *c).max().unwrap_or(1) as f32
-                            * 30.0) as usize;
+                    let max_count = histogram.bins.iter().max().cloned().unwrap_or(1);
+                    let bin_width = (histogram.right - histogram.left) / histogram.bins.len() as f32;
+                    
+                    for (i, &count) in histogram.bins.iter().enumerate() {
+                        let range_start = histogram.left + i as f32 * bin_width;
+                        let range_end = histogram.left + (i + 1) as f32 * bin_width;
+                        let bar_len = (count as f32 / max_count as f32 * 30.0) as usize;
                         let bar = "█".repeat(bar_len);
                         text.push_line(vec![
                             format!("{:6.2}-{:6.2}: ", range_start, range_end).into(),
@@ -662,16 +707,23 @@ impl App {
                             format!(" ({})", count).into(),
                         ]);
                     }
-                }
-                Err(e) => {
+                } else if let Some(error) = analysis_data.error.get() {
                     text.push_line(vec![
                         "Error loading tensor data: ".fg(Color::Red),
-                        format!("{}", e).into(),
+                        format!("{}", error).into(),
+                    ]);
+                } else {
+                    text.push_line(vec![
+                        "🔄 Computing histogram...".fg(Color::Yellow),
                     ]);
                 }
+            } else {
+                text.push_line(vec![
+                    "Analysis cancelled".fg(Color::Gray),
+                ]);
             }
         } else {
-            text.push_line(Line::from("No data source available"));
+            text.push_line(Line::from("No analysis available"));
         }
 
         let histogram_widget = Paragraph::new(text)
@@ -686,66 +738,13 @@ impl App {
         &mut self,
         f: &mut ratatui::Frame,
         area: Rect,
-        tensor_info: &TensorInfo,
+        _tensor_info: &TensorInfo,
     ) {
         let mut text = Text::default();
-
-        if let Some(source) = &mut self.source {
-            match source.tensor_f32((*tensor_info).clone(), Ref::null()) {
-                Ok(data) => {
-                    let rows = tensor_info.shape[0] as usize;
-                    let cols = tensor_info.shape[1] as usize;
-
-                    if data.len() == rows * cols {
-                        match self.calculate_singular_values(&data, rows, cols) {
-                            Ok(singular_values) => {
-                                text.push_line(vec![
-                                    "Matrix shape: ".bold(),
-                                    format!("{}×{}", rows, cols).into(),
-                                ]);
-                                text.push_line(vec![
-                                    "Rank (approx): ".bold(),
-                                    singular_values
-                                        .iter()
-                                        .filter(|&&x| x > 1e-6)
-                                        .count()
-                                        .to_string()
-                                        .into(),
-                                ]);
-                                text.push_line(Line::from(""));
-
-                                text.push_line("Top 10 singular values:".bold());
-                                for (i, &sv) in singular_values.iter().take(10).enumerate() {
-                                    let bar_len = (sv / singular_values[0] * 20.0) as usize;
-                                    let bar = "█".repeat(bar_len.max(1));
-                                    text.push_line(vec![
-                                        format!("{:2}: ", i + 1).into(),
-                                        bar.fg(Color::Green),
-                                        format!(" {:.4}", sv).into(),
-                                    ]);
-                                }
-                            }
-                            Err(e) => {
-                                text.push_line(vec![
-                                    "SVD error: ".fg(Color::Red),
-                                    format!("{}", e).into(),
-                                ]);
-                            }
-                        }
-                    } else {
-                        text.push_line("Data size mismatch with tensor shape".fg(Color::Red));
-                    }
-                }
-                Err(e) => {
-                    text.push_line(vec![
-                        "Error loading tensor data: ".fg(Color::Red),
-                        format!("{}", e).into(),
-                    ]);
-                }
-            }
-        } else {
-            text.push_line(Line::from("No data source available"));
-        }
+        
+        text.push_line(vec![
+            "🔄 Computing singular values...".fg(Color::Yellow),
+        ]);
 
         let svd_widget = Paragraph::new(text)
             .block(self.format_block("Singular Values", Panel::Analysis))
@@ -755,78 +754,30 @@ impl App {
         f.render_widget(svd_widget, area);
     }
 
-    fn calculate_histogram(&self, data: &[f32], bins: usize) -> Vec<(f32, f32, usize)> {
-        if data.is_empty() {
-            return Vec::new();
+    fn update_analysis_for_selected_tensor(&mut self) {
+        let Some(tree) = &self.tree_state else { return };
+        let selected_item = tree
+            .list_state
+            .borrow()
+            .selected()
+            .and_then(|i| tree.visible_items.get(i));
+
+        let Some(item) = selected_item else { return };
+        let Some(tensor_info) = &item.info.tensor_info else { return };
+        let Some(sender) = &self.analysis_sender else { return };
+
+        let analysis = Own::new(Box::new(Analysis {
+            tensor: tensor_info.clone(),
+            histogram: std::sync::OnceLock::new(),
+            error: std::sync::OnceLock::new(),
+        }));
+
+        let analysis_ref = refer!(analysis);
+        if let Err(_) = sender.try_send(analysis_ref) {
+            // Channel full, ignore
         }
 
-        let min = data.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-        let max = data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-
-        if min == max {
-            return vec![(min, max, data.len())];
-        }
-
-        let bin_width = (max - min) / bins as f32;
-        let mut histogram = vec![0; bins];
-
-        for &value in data {
-            let bin = ((value - min) / bin_width).floor() as usize;
-            let bin = bin.min(bins - 1);
-            histogram[bin] += 1;
-        }
-
-        histogram
-            .into_iter()
-            .enumerate()
-            .map(|(i, count)| {
-                let range_start = min + i as f32 * bin_width;
-                let range_end = min + (i + 1) as f32 * bin_width;
-                (range_start, range_end, count)
-            })
-            .collect()
-    }
-
-    fn calculate_singular_values(
-        &self,
-        data: &[f32],
-        rows: usize,
-        cols: usize,
-    ) -> Result<Vec<f32>, Error> {
-        // Simple SVD implementation using power iteration for demonstration
-        // For a production implementation, you'd want to use a proper linear algebra library
-        let mut matrix: Vec<Vec<f32>> = vec![vec![0.0; cols]; rows];
-
-        for (i, &value) in data.iter().enumerate() {
-            let row = i / cols;
-            let col = i % cols;
-            if row < rows && col < cols {
-                matrix[row][col] = value;
-            }
-        }
-
-        // Compute A^T * A for eigenvalue decomposition
-        let mut ata = vec![vec![0.0; cols]; cols];
-        for i in 0..cols {
-            for j in 0..cols {
-                let mut sum = 0.0;
-                for k in 0..rows {
-                    sum += matrix[k][i] * matrix[k][j];
-                }
-                ata[i][j] = sum;
-            }
-        }
-
-        // Extract diagonal values as rough approximation of singular values
-        let mut singular_values: Vec<f32> = ata
-            .iter()
-            .enumerate()
-            .map(|(i, row)| row[i].sqrt())
-            .collect();
-
-        singular_values.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-
-        Ok(singular_values)
+        self.current_analysis = Some(analysis);
     }
 }
 
