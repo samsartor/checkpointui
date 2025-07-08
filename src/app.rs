@@ -72,6 +72,7 @@ pub const DTYPE_FG: Color = Color::Yellow;
 pub const COUNT_FG: Color = Color::White;
 pub const BYTESIZE_FG: Color = Color::Magenta;
 
+#[derive(Default)]
 pub struct App {
     should_quit: bool,
     file_path: Option<PathBuf>,
@@ -86,26 +87,6 @@ pub struct App {
     pub path_split: PathSplit,
     analysis_sender: Option<Sender<Ref<Analysis>>>,
     current_analysis: Option<Own<Box<Analysis>>>,
-}
-
-impl Default for App {
-    fn default() -> Self {
-        Self {
-            should_quit: false,
-            file_path: None,
-            tree_state: None,
-            extra_metadata: None,
-            source: None,
-            formatted_extra: String::new(),
-            count_formatter: Formatter::default(),
-            bytes_formatter: Formatter::default(),
-            selected_panel: Panel::default(),
-            helptext: String::new(),
-            path_split: PathSplit::default(),
-            analysis_sender: None,
-            current_analysis: None,
-        }
-    }
 }
 
 struct TreeState {
@@ -473,7 +454,7 @@ impl App {
                     spans.push(format!(" {:?}", tensor_info.shape).fg(SHAPE_FG));
                     spans.push(format!(" {}", tensor_info.ty).fg(DTYPE_FG));
                     let size = self.format_bytes(tensor_info.size);
-                    spans.push(format!(" {}", size).fg(BYTESIZE_FG));
+                    spans.push(format!(" {size}").fg(BYTESIZE_FG));
                 }
 
                 Line::from(spans)
