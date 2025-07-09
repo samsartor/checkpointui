@@ -141,6 +141,15 @@ impl<'a> MatrixOperations for MTM<'a> {
     }
 }
 
+/// This does stochastic Lanczos quadrature, as described in a few different
+/// places:
+/// - https://arxiv.org/pdf/2105.06595
+/// - https://github.com/google/spectral-density
+/// - https://arxiv.org/pdf/1901.10159
+/// - https://math.berkeley.edu/~linlin/publications/DensityOfStates.pdf
+///
+/// Also notice that we compute the eigenvalues of the symmetric A^T * A, which
+/// are the squares of the singular values of whatever arbitrary A.
 fn compute_spectrum(
     info: TensorInfo,
     data: &[f64],
