@@ -87,6 +87,7 @@ pub struct App {
     pub path_split: PathSplit,
     analysis_sender: Option<Sender<Ref<Analysis>>>,
     current_analysis: Option<Own<Box<Analysis>>>,
+    pub ground_truth_svd: bool,
 }
 
 struct TreeState {
@@ -800,6 +801,7 @@ impl App {
             spectrum: std::sync::OnceLock::new(),
             error: std::sync::OnceLock::new(),
             max_bin_count: 20,
+            ground_truth_svd: self.ground_truth_svd,
         }));
 
         let analysis_ref = refer!(analysis);

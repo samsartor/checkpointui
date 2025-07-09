@@ -14,6 +14,7 @@ pub struct Analysis {
     pub histogram: OnceLock<Histogram>,
     pub spectrum: OnceLock<Spectrum>,
     pub error: OnceLock<Error>,
+    pub ground_truth_svd: bool,
 }
 
 pub struct Histogram {
@@ -179,8 +180,8 @@ fn compute_spectrum(
     };
     assert!(mtm.ncols() == rank);
     let mut lanczos = Vec::new();
-    let inner_iters = 50;
-    let outer_iters = 50;
+    let inner_iters = 200;
+    let outer_iters = 100;
     for _ in 0..outer_iters {
         let HermitianLanczos {
             eigenvalues,
@@ -188,7 +189,10 @@ fn compute_spectrum(
         } = HermitianLanczos::new(mtm.clone(), inner_iters, SpectrumTarget::Highest).unwrap();
         assert_eq!(eigenvectors.shape(), (rank, inner_iters));
         for i in 0..eigenvalues.len() {
-            lanczos.push((eigenvalues[i].abs().sqrt(), eigenvectors[(0, i)].abs()));
+            // eigenvalues of A^T*A are squares of singular values, so sqrt to get singular values
+            let singular_value = eigenvalues[i].abs().sqrt();
+            let weight = eigenvectors[(0, i)];
+            lanczos.push((singular_value, weight * weight));
         }
     }
     lanczos.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
@@ -222,8 +226,75 @@ fn compute_spectrum(
     });
 }
 
+fn compute_spectrum_ground_truth(
+    info: TensorInfo,
+    data: &[f64],
+    bin_count: usize,
+    out: Ref<OnceLock<Spectrum>>,
+) {
+    if data.is_empty() {
+        let _ = out.get(&pin()).unwrap().set(Spectrum {
+            left: 0.0,
+            right: 1.0,
+            rank: 0,
+            bins: vec![0.0],
+        });
+        return;
+    }
+    let &[h, w] = info.shape.as_slice() else {
+        return;
+    };
+    let h = h as usize;
+    let w = w as usize;
+    let rank = h.min(w);
+    let matrix = DMatrix::from_row_slice(h, w, data);
+
+    // Compute SVD using nalgebra
+    let svd = nalgebra::linalg::SVD::new(matrix, false, false);
+    let singular_values = svd.singular_values;
+
+    // Convert singular values to histogram
+    let mut values: Vec<f64> = singular_values.iter().cloned().collect();
+    values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let left = 0.0;
+    let mut right = if values.len() >= 20 {
+        values[19 * values.len() / 20]
+    } else {
+        values.last().copied().unwrap_or(1.0)
+    };
+    right += 0.15 * right / 0.95;
+
+    let scale = bin_count as f64 / (right - left);
+    let mut bins = vec![0.0f64; bin_count];
+    let bins_end = (bin_count - 1) as f64;
+
+    // Create histogram with uniform weight (1.0) for each singular value
+    for value in values {
+        let bin = ((value - left) * scale).clamp(0.0, bins_end);
+        if !bin.is_finite() {
+            continue;
+        }
+        let bin = bin as usize;
+        bins[bin] += 1.0;
+    }
+
+    // Normalize bins to match expected density
+    let bin_scale = rank as f64 / bins.iter().sum::<f64>();
+    for bin in &mut bins {
+        *bin *= bin_scale;
+    }
+
+    let _ = out.get(&pin()).unwrap().set(Spectrum {
+        left,
+        right,
+        rank,
+        bins,
+    });
+}
+
 fn do_analysis(source: &mut dyn ModuleSource, request: Ref<Analysis>) -> Result<(), Error> {
-    let (tensor, max_bin_count, cancel, histogram, spectrum) = {
+    let (tensor, max_bin_count, cancel, histogram, spectrum, ground_truth_svd) = {
         let guard = pin();
         let cancel = request.map_with(|_| &(), &guard);
         let histogram = request.map_with(|req| &req.histogram, &guard);
@@ -235,11 +306,16 @@ fn do_analysis(source: &mut dyn ModuleSource, request: Ref<Analysis>) -> Result<
             cancel,
             histogram,
             spectrum,
+            request.ground_truth_svd,
         )
     };
     let data = source.tensor_f64(tensor.clone(), cancel)?;
     compute_histogram(&data, max_bin_count, histogram);
-    compute_spectrum(tensor, &data, max_bin_count, spectrum);
+    if ground_truth_svd {
+        compute_spectrum_ground_truth(tensor, &data, max_bin_count, spectrum);
+    } else {
+        compute_spectrum(tensor, &data, max_bin_count, spectrum);
+    }
     Ok(())
 }
 
