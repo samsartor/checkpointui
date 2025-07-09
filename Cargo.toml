@@ -9,11 +9,14 @@ anyhow = "1.0.98"
 clap = { version = "4.5.38", features = ["derive"] }
 colored_json = "5.0.0"
 crossbeam = "0.8.4"
+eigenvalues = "0.4.0"
 float8 = { version = "0.2.1", features = ["zerocopy"] }
 half = { version = "=2.4.1", features = ["zerocopy"] }
 human_format = "1.1.0"
 json5 = "0.4.1"
 lexical-sort = "0.3.1"
+nalgebra = "0.24.1"
+ndarray = "0.16.1"
 owning_ref = "0.4.1"
 ratatui = "0.29.0"
 regex = "1.11.1"
