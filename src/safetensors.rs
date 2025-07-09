@@ -4,11 +4,13 @@ use safetensors::{SafeTensorError, tensor::Metadata};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{Read, Seek};
+use std::mem::size_of;
 use std::path::Path;
 use weakref::Ref;
 
 pub struct Safetensors<I> {
     io: I,
+    data_offset: u64,
     metadata: Metadata,
 }
 
@@ -16,15 +18,21 @@ impl Safetensors<File> {
     pub fn open_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let mut io = File::open(&path)?;
-        let metadata = read_metadata(&mut io, &path)?;
-        Ok(Safetensors { io, metadata })
+        let (metadata, data_offset) = read_metadata(&mut io, &path)?;
+        let data_offset = data_offset as u64;
+        Ok(Safetensors {
+            io,
+            data_offset,
+            metadata,
+        })
     }
 }
 
 impl<I: Read + Seek> Safetensors<I> {
     fn tensor_bytes(&mut self, seek: &TensorSeek) -> Result<Vec<u8>> {
         let &TensorSeek::InFile { start, end } = seek;
-        self.io.seek(std::io::SeekFrom::Start(start))?;
+        self.io
+            .seek(std::io::SeekFrom::Start(start + self.data_offset))?;
         let mut data = vec![
             0;
             end.checked_sub(start)
@@ -120,7 +128,7 @@ impl From<&'_ safetensors::tensor::TensorInfo> for TensorInfo {
 
 const HEADER_MIB_LIMIT: usize = 100;
 
-fn read_metadata<I: Read>(io: &mut I, path: &Path) -> Result<Metadata, Error> {
+fn read_metadata<I: Read>(io: &mut I, path: &Path) -> Result<(Metadata, usize), Error> {
     let mut header_size_bytes = [0u8; 8];
     io.read_exact(&mut header_size_bytes)?;
     let n = u64::from_le_bytes(header_size_bytes) as usize;
@@ -141,5 +149,5 @@ fn read_metadata<I: Read>(io: &mut I, path: &Path) -> Result<Metadata, Error> {
     let metadata: Metadata = serde_json::from_str(metadata_str)
         .map_err(|_| SafeTensorError::InvalidHeaderDeserialization)?;
 
-    Ok(metadata)
+    Ok((metadata, n + size_of::<u64>()))
 }
