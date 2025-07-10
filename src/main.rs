@@ -19,12 +19,6 @@ struct Cli {
         default_value_t = '.'
     )]
     module_delim: char,
-    #[arg(
-        help = "Use ground-truth SVD instead of stochastic Lanczos for spectrum estimation",
-        long,
-        default_value_t = false
-    )]
-    ground_truth_svd: bool,
 }
 
 fn main() -> Result<(), anyhow::Error> {
@@ -34,7 +28,6 @@ fn main() -> Result<(), anyhow::Error> {
     let mut app = app::App::new();
     app.helptext = Cli::command().render_long_help().to_string();
     app.path_split = model::PathSplit::Delim(cli.module_delim);
-    app.ground_truth_svd = cli.ground_truth_svd;
 
     if let Some(file_path) = cli.file_path {
         if let Err(e) = app.load_file(file_path) {

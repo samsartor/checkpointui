@@ -87,7 +87,6 @@ pub struct App {
     pub path_split: PathSplit,
     analysis_sender: Option<Sender<Ref<Analysis>>>,
     current_analysis: Option<Own<Box<Analysis>>>,
-    pub ground_truth_svd: bool,
 }
 
 struct TreeState {
@@ -671,12 +670,12 @@ impl App {
 
                     let max_count = histogram.bins.iter().max().cloned().unwrap_or(1);
                     let bin_width =
-                        (histogram.right - histogram.left) / histogram.bins.len() as f64;
+                        (histogram.right - histogram.left) / histogram.bins.len() as f32;
 
                     for (i, &count) in histogram.bins.iter().enumerate() {
-                        let range_start = histogram.left + i as f64 * bin_width;
-                        let range_end = histogram.left + (i + 1) as f64 * bin_width;
-                        let bar_len = (count as f64 / max_count as f64 * 30.0) as usize;
+                        let range_start = histogram.left + i as f32 * bin_width;
+                        let range_end = histogram.left + (i + 1) as f32 * bin_width;
+                        let bar_len = (count as f32 / max_count as f32 * 30.0) as usize;
                         let bar = "█".repeat(bar_len);
                         if i == 0 {
                             text.push_line(vec![
@@ -738,11 +737,11 @@ impl App {
                         .max_by(|a, b| a.partial_cmp(b).unwrap())
                         .cloned()
                         .unwrap_or(1.0);
-                    let bin_width = (spectrum.right - spectrum.left) / spectrum.bins.len() as f64;
+                    let bin_width = (spectrum.right - spectrum.left) / spectrum.bins.len() as f32;
 
                     for (i, &count) in spectrum.bins.iter().enumerate() {
-                        let range_start = spectrum.left + i as f64 * bin_width;
-                        let range_end = spectrum.left + (i + 1) as f64 * bin_width;
+                        let range_start = spectrum.left + i as f32 * bin_width;
+                        let range_end = spectrum.left + (i + 1) as f32 * bin_width;
                         let bar_len = (count / max_count * 30.0) as usize;
                         let bar = "█".repeat(bar_len);
                         if i + 1 == spectrum.bins.len() {
@@ -801,7 +800,6 @@ impl App {
             spectrum: std::sync::OnceLock::new(),
             error: std::sync::OnceLock::new(),
             max_bin_count: 20,
-            ground_truth_svd: self.ground_truth_svd,
         }));
 
         let analysis_ref = refer!(analysis);
