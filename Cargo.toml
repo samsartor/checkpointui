@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 ansi-to-tui = "7.0.0"
 anyhow = "1.0.98"
-async_cell = "0.2.2"
+async_cell = { version = "0.2.3", features = ["weakref"] }
 clap = { version = "4.5.38", features = ["derive"] }
 colored_json = "5.0.0"
 faer = "0.22.6"

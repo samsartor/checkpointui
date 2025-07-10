@@ -84,7 +84,7 @@ pub struct App {
     selected_panel: Panel,
     pub helptext: String,
     pub path_split: PathSplit,
-    analysis_sender: Arc<AnalysisCell>,
+    analysis_sender: Option<Own<Box<AnalysisCell>>>,
     current_analysis: Option<Own<Box<Analysis>>>,
 }
 
@@ -252,8 +252,11 @@ impl App {
 
         // Now that we have the tree, move the source to the analysis thread
         let source = self.source.take().unwrap();
-        self.analysis_sender = AnalysisCell::shared();
-        start_analysis_thread(source, Arc::downgrade(&self.analysis_sender));
+        let sender = self
+            .analysis_sender
+            .insert(Own::new_box(AnalysisCell::new()))
+            .refer();
+        start_analysis_thread(source, sender);
 
         // Start analysis for the initially selected tensor
         self.update_analysis_for_selected_tensor();
@@ -798,7 +801,9 @@ impl App {
             error: std::sync::OnceLock::new(),
             max_bin_count: 20,
         }));
-        self.analysis_sender.set(analysis.refer());
+        if let Some(sender) = self.analysis_sender.as_ref() {
+            sender.set(analysis.refer());
+        }
         self.current_analysis = Some(analysis);
     }
 }

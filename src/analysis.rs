@@ -1,8 +1,8 @@
 use anyhow::{Error, anyhow, bail};
-use async_cell::sync::{AsyncCell, TakeWeak};
+use async_cell::sync::{AsyncCell, TakeRef};
 use futures_lite::future::block_on;
 use rand::seq::SliceRandom;
-use std::sync::{OnceLock, Weak};
+use std::sync::OnceLock;
 use weakref::{Ref, pin};
 
 use crate::model::{ModuleSource, TensorInfo};
@@ -214,9 +214,9 @@ fn do_analysis(source: &mut dyn ModuleSource, request: Ref<Analysis>) -> Result<
 
 pub type AnalysisCell = AsyncCell<Ref<Analysis>>;
 
-pub fn run_analysis_loop(mut source: Box<dyn ModuleSource>, requests: Weak<AnalysisCell>) {
+pub fn run_analysis_loop(mut source: Box<dyn ModuleSource>, requests: Ref<AnalysisCell>) {
     loop {
-        let Some(request) = block_on(TakeWeak(requests.clone())) else {
+        let Some(request) = block_on(TakeRef(requests)) else {
             return;
         };
         match do_analysis(&mut *source, request) {
@@ -230,7 +230,7 @@ pub fn run_analysis_loop(mut source: Box<dyn ModuleSource>, requests: Weak<Analy
     }
 }
 
-pub fn start_analysis_thread(source: Box<dyn ModuleSource + Send>, cell: Weak<AnalysisCell>) {
+pub fn start_analysis_thread(source: Box<dyn ModuleSource + Send>, cell: Ref<AnalysisCell>) {
     std::thread::spawn(move || {
         run_analysis_loop(source, cell);
     });
