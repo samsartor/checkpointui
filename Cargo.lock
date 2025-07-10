@@ -214,6 +214,7 @@ dependencies = [
  "json5",
  "lexical-sort",
  "owning_ref",
+ "rand 0.8.5",
  "ratatui",
  "regex",
  "safetensors",

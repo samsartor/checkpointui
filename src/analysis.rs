@@ -1,5 +1,6 @@
-use anyhow::{Error, anyhow};
+use anyhow::{Error, anyhow, bail};
 use crossbeam::channel::{Receiver, Sender};
+use rand::seq::SliceRandom;
 use std::panic;
 use std::sync::OnceLock;
 use weakref::{Ref, pin};
@@ -24,17 +25,17 @@ pub struct BarChart {
 
 impl Default for BarChart {
     fn default() -> Self {
-        return BarChart {
+        BarChart {
             bins: vec![0],
             left: 0.0,
             right: 1.0,
             continues_past_left: true,
             continues_past_right: true,
-        };
+        }
     }
 }
 
-const CHECK_EVERY: usize = 1024 * 1024;
+const QUARTILE_SAMPLES: usize = 200;
 
 #[derive(Default)]
 pub struct Histogram {
@@ -49,42 +50,55 @@ impl Histogram {
         max_bin_count: usize,
         force_min_zero: bool,
         cancel: Ref<()>,
-    ) -> Histogram {
+    ) -> Result<Histogram, Error> {
         if data.is_empty() {
-            return Histogram::default();
+            bail!("tensor is empty");
         }
-        let mut since_check = 0;
-        let mut data = data.to_vec();
-        data.sort_unstable_by(|a, b| {
-            if since_check >= CHECK_EVERY {
-                assert!(cancel.is_alive());
-                since_check = 0;
-            }
-            since_check += 1;
+
+        // For large datasets, use random sampling to estimate quantiles
+        let sample_data = if data.len() > QUARTILE_SAMPLES {
+            let mut rng = rand::thread_rng();
+            let mut sample = data.to_vec();
+            sample.shuffle(&mut rng);
+            sample.truncate(QUARTILE_SAMPLES);
+            sample
+        } else {
+            data.to_vec()
+        };
+
+        // Sort the sample (much smaller now)
+        let mut sorted_sample = sample_data.clone();
+        sorted_sample.sort_unstable_by(|a, b| {
             let a = if a.is_finite() { *a } else { 0.0 };
             let b = if a.is_finite() { *b } else { 0.0 };
             a.partial_cmp(&b).unwrap()
         });
-        assert!(cancel.is_alive());
-        let min = *data.first().unwrap();
-        let max = *data.last().unwrap();
+        if !cancel.is_alive() {
+            bail!("canceled");
+        }
+
+        // Find actual min/max from full dataset
+        let min = data.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = data.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 
         // Calculate display range
         let mut left = if force_min_zero { 0.0 } else { min };
         let mut right = max;
 
-        if data.len() >= 20 {
-            // Use 5% and 95% quartiles to estimate range
-            let q05 = data[data.len() / 20];
-            let q95 = data[19 * data.len() / 20];
+        if sorted_sample.len() >= QUARTILE_SAMPLES {
+            // Use 5% and 95% percentiles to estimate range
+            let p05_idx = ((sorted_sample.len() - 1) as f32 * 0.05) as usize;
+            let p95_idx = ((sorted_sample.len() - 1) as f32 * 0.95) as usize;
+            let q05 = sorted_sample[p05_idx];
+            let q95 = sorted_sample[p95_idx];
 
             if !force_min_zero {
-                // Estimate 0% from 5% and 95% quartiles
-                left = q05 - 0.1 * (q95 - q05) / 0.9;
+                // Estimate 0% from 5% and 95% percentiles
+                left = q05 - 0.05 * (q95 - q05) / 0.90;
             }
 
-            // Estimate 100% from 5% and 95% quartiles, then add 15%
-            right = q95 + 0.1 * (q95 - q05) / 0.9;
+            // Estimate 100% from 5% and 95% percentiles, then add 15%
+            right = q95 + 0.05 * (q95 - q05) / 0.90;
             right += 0.15 * right / 0.85;
         }
 
@@ -95,15 +109,10 @@ impl Histogram {
         scale = if scale.is_finite() { scale } else { 1.0 };
 
         // Determine continues_past flags based on range estimation
-        let continues_past_left = !force_min_zero && data.len() >= 20;
-        let continues_past_right = data.len() >= 20;
+        let continues_past_left = !force_min_zero && sorted_sample.len() >= QUARTILE_SAMPLES;
+        let continues_past_right = sorted_sample.len() >= QUARTILE_SAMPLES;
 
         for x in data {
-            if since_check >= CHECK_EVERY {
-                assert!(cancel.is_alive());
-                since_check = 0;
-            }
-            since_check += 1;
             let bin = ((x - left) * scale).clamp(0.0, bins_end);
             if !bin.is_finite() {
                 continue;
@@ -111,7 +120,7 @@ impl Histogram {
             let bin = bin as usize;
             bins[bin] += 1;
         }
-        Histogram {
+        Ok(Histogram {
             min,
             max,
             chart: BarChart {
@@ -121,7 +130,7 @@ impl Histogram {
                 continues_past_left,
                 continues_past_right,
             },
-        }
+        })
     }
 }
 
@@ -134,14 +143,18 @@ fn compute_histogram(
     data: &[f32],
     bin_count: usize,
     out: Ref<OnceLock<Histogram>>,
-) {
+) -> Result<(), Error> {
     let guard = pin();
-    let _ = out.get(&guard).unwrap().set(Histogram::new(
-        &data,
-        bin_count,
-        false,
-        out.map_with(|_| &(), &guard),
-    ));
+    let _ = out
+        .get(&guard)
+        .ok_or(anyhow!("cancelled"))?
+        .set(Histogram::new(
+            data,
+            bin_count,
+            false,
+            out.map_with(|_| &(), &guard),
+        )?);
+    Ok(())
 }
 
 fn compute_spectrum(
@@ -149,29 +162,33 @@ fn compute_spectrum(
     data: &[f32],
     bin_count: usize,
     out: Ref<OnceLock<Spectrum>>,
-) {
+) -> Result<(), Error> {
     if data.is_empty() {
-        let _ = out.get(&pin()).unwrap().set(Spectrum {
+        let _ = out.get(&pin()).ok_or(anyhow!("cancelled"))?.set(Spectrum {
             chart: BarChart::default(),
         });
-        return;
+        bail!("tensor is empty");
     }
+    if !out.is_alive() {
+        bail!("canceled");
+    }
+
     let &[h, w] = info.shape.as_slice() else {
-        return;
+        return Ok(());
     };
     let h = h as usize;
     let w = w as usize;
     let matrix = faer::MatRef::from_row_major_slice(data, h, w);
 
     // Compute SVD using faer
-    let Ok(values) = matrix.singular_values() else {
-        return;
-    };
-
+    let values = matrix
+        .singular_values()
+        .map_err(|err| anyhow!("could not perform SVD: {err:?}"))?;
     let guard = pin();
-    let _ = out.get(&guard).unwrap().set(Spectrum {
-        chart: Histogram::new(&values, bin_count, true, out.map_with(|_| &(), &guard)).chart,
+    let _ = out.get(&guard).ok_or(anyhow!("cancelled"))?.set(Spectrum {
+        chart: Histogram::new(&values, bin_count, true, out.map_with(|_| &(), &guard))?.chart,
     });
+    Ok(())
 }
 
 fn do_analysis(source: &mut dyn ModuleSource, request: Ref<Analysis>) -> Result<(), Error> {
@@ -180,7 +197,7 @@ fn do_analysis(source: &mut dyn ModuleSource, request: Ref<Analysis>) -> Result<
         let cancel = request.map_with(|_| &(), &guard);
         let histogram = request.map_with(|req| &req.histogram, &guard);
         let spectrum = request.map_with(|req| &req.spectrum, &guard);
-        let request = request.get(&guard).unwrap();
+        let request = request.get(&guard).ok_or(anyhow!("cancelled"))?;
         (
             request.tensor.clone(),
             request.max_bin_count,
@@ -190,29 +207,19 @@ fn do_analysis(source: &mut dyn ModuleSource, request: Ref<Analysis>) -> Result<
         )
     };
     let data = source.tensor_f32(tensor.clone(), cancel)?;
-    compute_histogram(tensor.clone(), &data, max_bin_count, histogram);
-    compute_spectrum(tensor, &data, max_bin_count, spectrum);
+    compute_histogram(tensor.clone(), &data, max_bin_count, histogram)?;
+    compute_spectrum(tensor, &data, max_bin_count, spectrum)?;
     Ok(())
 }
 
 pub fn run_analysis_loop(mut source: Box<dyn ModuleSource>, requests: Receiver<Ref<Analysis>>) {
-    panic::set_hook(Box::new(|_| {}));
     loop {
         let Ok(request) = requests.recv() else { return };
-        match panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            do_analysis(&mut *source, request)
-        })) {
-            Ok(Ok(_)) => (),
-            Ok(Err(err)) => {
-                request.inspect(|r| {
-                    let _ = r.error.set(err);
-                });
-            }
+        match do_analysis(&mut *source, request) {
+            Ok(_) => (),
             Err(err) => {
                 request.inspect(|r| {
-                    if let Some(msg) = err.downcast_ref::<&str>() {
-                        let _ = r.error.set(anyhow!("panic in analysis: {msg}"));
-                    }
+                    let _ = r.error.set(err);
                 });
             }
         }
