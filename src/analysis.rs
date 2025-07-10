@@ -14,82 +14,134 @@ pub struct Analysis {
     pub error: OnceLock<Error>,
 }
 
-pub struct Histogram {
-    pub min: f32,
-    pub max: f32,
+pub struct BarChart {
+    pub bins: Vec<usize>,
     pub left: f32,
     pub right: f32,
-    pub bins: Vec<usize>,
+    pub continues_past_left: bool,
+    pub continues_past_right: bool,
+}
+
+impl Default for BarChart {
+    fn default() -> Self {
+        return BarChart {
+            bins: vec![0],
+            left: 0.0,
+            right: 1.0,
+            continues_past_left: true,
+            continues_past_right: true,
+        };
+    }
 }
 
 const CHECK_EVERY: usize = 1024 * 1024;
 
-pub fn compute_histogram(data: &[f32], max_bin_count: usize, out: Ref<OnceLock<Histogram>>) {
-    if data.is_empty() {
-        let _ = out.get(&pin()).unwrap().set(Histogram {
-            min: 0.0,
-            max: 1.0,
-            left: 0.0,
-            right: 1.0,
-            bins: vec![0],
+#[derive(Default)]
+pub struct Histogram {
+    pub min: f32,
+    pub max: f32,
+    pub chart: BarChart,
+}
+
+impl Histogram {
+    pub fn new(
+        data: &[f32],
+        max_bin_count: usize,
+        force_min_zero: bool,
+        cancel: Ref<()>,
+    ) -> Histogram {
+        if data.is_empty() {
+            return Histogram::default();
+        }
+        let mut since_check = 0;
+        let mut data = data.to_vec();
+        data.sort_unstable_by(|a, b| {
+            if since_check >= CHECK_EVERY {
+                assert!(cancel.is_alive());
+                since_check = 0;
+            }
+            since_check += 1;
+            let a = if a.is_finite() { *a } else { 0.0 };
+            let b = if a.is_finite() { *b } else { 0.0 };
+            a.partial_cmp(&b).unwrap()
         });
-        return;
-    }
-    let mut since_check = 0;
-    let mut data = data.to_vec();
-    data.sort_unstable_by(|a, b| {
-        if since_check >= CHECK_EVERY {
-            assert!(out.is_alive());
-            since_check = 0;
+        assert!(cancel.is_alive());
+        let min = *data.first().unwrap();
+        let max = *data.last().unwrap();
+
+        // Calculate display range
+        let mut left = if force_min_zero { 0.0 } else { min };
+        let mut right = max;
+
+        if data.len() >= 20 {
+            // Use 5% and 95% quartiles to estimate range
+            let q05 = data[data.len() / 20];
+            let q95 = data[19 * data.len() / 20];
+
+            if !force_min_zero {
+                // Estimate 0% from 5% and 95% quartiles
+                left = q05 - 0.1 * (q95 - q05) / 0.9;
+            }
+
+            // Estimate 100% from 5% and 95% quartiles, then add 15%
+            right = q95 + 0.1 * (q95 - q05) / 0.9;
+            right += 0.15 * right / 0.85;
         }
-        since_check += 1;
-        let a = if a.is_finite() { *a } else { 0.0 };
-        let b = if a.is_finite() { *b } else { 0.0 };
-        a.partial_cmp(&b).unwrap()
-    });
-    assert!(out.is_alive());
-    let min = *data.first().unwrap();
-    let max = *data.last().unwrap();
-    let mut left = min;
-    let mut right = max;
-    if data.len() >= 10 {
-        left = data[data.len() / 20];
-        right = data[19 * data.len() / 20];
-        left -= 0.1 * (right - left) / 0.9;
-        right += 0.1 * (right - left) / 0.9;
-    }
-    let bin_count = (data.len() / 5).clamp(5, max_bin_count);
-    let mut bins = vec![0usize; bin_count];
-    let bins_end = (bin_count - 1) as f32;
-    let mut scale = bins.len() as f32 / (right - left);
-    scale = if scale.is_finite() { scale } else { 1.0 };
-    for x in data {
-        if since_check >= CHECK_EVERY {
-            assert!(out.is_alive());
-            since_check = 0;
+
+        let bin_count = (data.len() / 5).clamp(5, max_bin_count);
+        let mut bins = vec![0usize; bin_count];
+        let bins_end = (bin_count - 1) as f32;
+        let mut scale = bins.len() as f32 / (right - left);
+        scale = if scale.is_finite() { scale } else { 1.0 };
+
+        // Determine continues_past flags based on range estimation
+        let continues_past_left = !force_min_zero && data.len() >= 20;
+        let continues_past_right = data.len() >= 20;
+
+        for x in data {
+            if since_check >= CHECK_EVERY {
+                assert!(cancel.is_alive());
+                since_check = 0;
+            }
+            since_check += 1;
+            let bin = ((x - left) * scale).clamp(0.0, bins_end);
+            if !bin.is_finite() {
+                continue;
+            }
+            let bin = bin as usize;
+            bins[bin] += 1;
         }
-        since_check += 1;
-        let bin = ((x - left) * scale).clamp(0.0, bins_end);
-        if !bin.is_finite() {
-            continue;
+        Histogram {
+            min,
+            max,
+            chart: BarChart {
+                bins,
+                left,
+                right,
+                continues_past_left,
+                continues_past_right,
+            },
         }
-        let bin = bin as usize;
-        bins[bin] += 1;
     }
-    let _ = out.get(&pin()).unwrap().set(Histogram {
-        min,
-        max,
-        left,
-        right,
-        bins,
-    });
 }
 
 pub struct Spectrum {
-    pub left: f32,
-    pub right: f32,
-    pub rank: usize,
-    pub bins: Vec<f32>,
+    pub chart: BarChart,
+}
+
+fn compute_histogram(
+    _info: TensorInfo,
+    data: &[f32],
+    bin_count: usize,
+    out: Ref<OnceLock<Histogram>>,
+) {
+    let guard = pin();
+    let _ = out.get(&guard).unwrap().set(Histogram::new(
+        &data,
+        bin_count,
+        false,
+        out.map_with(|_| &(), &guard),
+    ));
 }
 
 fn compute_spectrum(
@@ -100,10 +152,7 @@ fn compute_spectrum(
 ) {
     if data.is_empty() {
         let _ = out.get(&pin()).unwrap().set(Spectrum {
-            left: 0.0,
-            right: 1.0,
-            rank: 0,
-            bins: vec![0.0],
+            chart: BarChart::default(),
         });
         return;
     }
@@ -112,50 +161,16 @@ fn compute_spectrum(
     };
     let h = h as usize;
     let w = w as usize;
-    let rank = h.min(w);
     let matrix = faer::MatRef::from_row_major_slice(data, h, w);
 
-    // Compute SVD using nalgebra
-    let Ok(mut values) = matrix.singular_values() else {
+    // Compute SVD using faer
+    let Ok(values) = matrix.singular_values() else {
         return;
     };
 
-    // Convert singular values to histogram
-    values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-
-    let left = 0.0;
-    let mut right = if values.len() >= 20 {
-        values[19 * values.len() / 20]
-    } else {
-        values.last().copied().unwrap_or(1.0)
-    };
-    right += 0.15 * right / 0.95;
-
-    let scale = bin_count as f32 / (right - left);
-    let mut bins = vec![0.0f32; bin_count];
-    let bins_end = (bin_count - 1) as f32;
-
-    // Create histogram with uniform weight (1.0) for each singular value
-    for value in values {
-        let bin = ((value - left) * scale).clamp(0.0, bins_end);
-        if !bin.is_finite() {
-            continue;
-        }
-        let bin = bin as usize;
-        bins[bin] += 1.0;
-    }
-
-    // Normalize bins to match expected density
-    let bin_scale = rank as f32 / bins.iter().sum::<f32>();
-    for bin in &mut bins {
-        *bin *= bin_scale;
-    }
-
-    let _ = out.get(&pin()).unwrap().set(Spectrum {
-        left,
-        right,
-        rank,
-        bins,
+    let guard = pin();
+    let _ = out.get(&guard).unwrap().set(Spectrum {
+        chart: Histogram::new(&values, bin_count, true, out.map_with(|_| &(), &guard)).chart,
     });
 }
 
@@ -175,7 +190,7 @@ fn do_analysis(source: &mut dyn ModuleSource, request: Ref<Analysis>) -> Result<
         )
     };
     let data = source.tensor_f32(tensor.clone(), cancel)?;
-    compute_histogram(&data, max_bin_count, histogram);
+    compute_histogram(tensor.clone(), &data, max_bin_count, histogram);
     compute_spectrum(tensor, &data, max_bin_count, spectrum);
     Ok(())
 }

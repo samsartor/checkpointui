@@ -655,6 +655,49 @@ impl App {
         }
     }
 
+    fn render_bar_chart(
+        chart: &crate::analysis::BarChart,
+        max_width: usize,
+        color: Color,
+        format_value: impl Fn(f32) -> String,
+    ) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+
+        if chart.bins.is_empty() {
+            return lines;
+        }
+
+        let max_count = chart.bins.iter().max().cloned().unwrap_or(1) as f32;
+        let bin_width = (chart.right - chart.left) / chart.bins.len() as f32;
+
+        for (i, &count) in chart.bins.iter().enumerate() {
+            let range_start = chart.left + i as f32 * bin_width;
+            let range_end = chart.left + (i + 1) as f32 * bin_width;
+            let bar_len = (count as f32 / max_count * max_width as f32) as usize;
+            let bar = "█".repeat(bar_len);
+
+            let label = if chart.continues_past_left && i == 0 {
+                format!("       {}: ", format_value(range_end))
+            } else if chart.continues_past_right && i + 1 == chart.bins.len() {
+                format!("{}       : ", format_value(range_start))
+            } else {
+                format!(
+                    "{} {}: ",
+                    format_value(range_start),
+                    format_value(range_end)
+                )
+            };
+
+            lines.push(Line::from(vec![
+                label.into(),
+                bar.fg(color),
+                format!(" ({})", count).into(),
+            ]));
+        }
+
+        lines
+    }
+
     fn render_histogram(&mut self, f: &mut ratatui::Frame, area: Rect, _tensor_info: &TensorInfo) {
         let mut text = Text::default();
 
@@ -668,35 +711,13 @@ impl App {
                     ]);
                     text.push_line(Line::from(""));
 
-                    let max_count = histogram.bins.iter().max().cloned().unwrap_or(1);
-                    let bin_width =
-                        (histogram.right - histogram.left) / histogram.bins.len() as f32;
-
-                    for (i, &count) in histogram.bins.iter().enumerate() {
-                        let range_start = histogram.left + i as f32 * bin_width;
-                        let range_end = histogram.left + (i + 1) as f32 * bin_width;
-                        let bar_len = (count as f32 / max_count as f32 * 30.0) as usize;
-                        let bar = "█".repeat(bar_len);
-                        if i == 0 {
-                            text.push_line(vec![
-                                format!("       {range_end:6.2}: ").into(),
-                                bar.fg(Color::Blue),
-                                format!(" ({count})").into(),
-                            ]);
-                        } else if i + 1 == histogram.bins.len() {
-                            text.push_line(vec![
-                                format!("{range_start:6.2}       : ").into(),
-                                bar.fg(Color::Blue),
-                                format!(" ({count})").into(),
-                            ]);
-                        } else {
-                            text.push_line(vec![
-                                format!("{range_start:6.2} {range_end:6.2}: ").into(),
-                                bar.fg(Color::Blue),
-                                format!(" ({count})").into(),
-                            ]);
-                        }
-                    }
+                    let chart_lines = Self::render_bar_chart(
+                        &histogram.chart,
+                        30, // max_width
+                        Color::Blue,
+                        |x| format!("{x:6.2}"),
+                    );
+                    text.extend(chart_lines);
                 } else if let Some(error) = analysis_data.error.get() {
                     text.push_line(vec!["Error: ".fg(Color::Red), format!("{error}").into()]);
                 } else {
@@ -731,33 +752,13 @@ impl App {
                 if let Some(spectrum) = analysis_data.spectrum.get() {
                     text.push_line(Line::from(""));
 
-                    let max_count = spectrum
-                        .bins
-                        .iter()
-                        .max_by(|a, b| a.partial_cmp(b).unwrap())
-                        .cloned()
-                        .unwrap_or(1.0);
-                    let bin_width = (spectrum.right - spectrum.left) / spectrum.bins.len() as f32;
-
-                    for (i, &count) in spectrum.bins.iter().enumerate() {
-                        let range_start = spectrum.left + i as f32 * bin_width;
-                        let range_end = spectrum.left + (i + 1) as f32 * bin_width;
-                        let bar_len = (count / max_count * 30.0) as usize;
-                        let bar = "█".repeat(bar_len);
-                        if i + 1 == spectrum.bins.len() {
-                            text.push_line(vec![
-                                format!("{range_start:6.2}       : ").into(),
-                                bar.fg(Color::Blue),
-                                format!(" ({count:.2})").into(),
-                            ]);
-                        } else {
-                            text.push_line(vec![
-                                format!("{range_start:6.2} {range_end:6.2}: ").into(),
-                                bar.fg(Color::Blue),
-                                format!(" ({count:.2})").into(),
-                            ]);
-                        }
-                    }
+                    let chart_lines = Self::render_bar_chart(
+                        &spectrum.chart,
+                        30, // max_width
+                        Color::Blue,
+                        |x| format!("{x:6.2}"),
+                    );
+                    text.extend(chart_lines);
                 } else if let Some(error) = analysis_data.error.get() {
                     text.push_line(vec!["Error: ".fg(Color::Red), format!("{error}").into()]);
                 } else {
