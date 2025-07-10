@@ -6,12 +6,12 @@ edition = "2024"
 [dependencies]
 ansi-to-tui = "7.0.0"
 anyhow = "1.0.98"
+async_cell = "0.2.2"
 clap = { version = "4.5.38", features = ["derive"] }
 colored_json = "5.0.0"
-crossbeam = "0.8.4"
-eigenvalues = "0.4.0"
 faer = "0.22.6"
 float8 = { version = "0.2.1", features = ["zerocopy"] }
+futures-lite = "2.6.0"
 half = { version = "=2.4.1", features = ["zerocopy"] }
 human_format = "1.1.0"
 json5 = "0.4.1"

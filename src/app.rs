@@ -1,5 +1,4 @@
 use anyhow::Error;
-use crossbeam::channel::Sender;
 use human_format::{Formatter, Scales};
 use lexical_sort::natural_lexical_cmp;
 use owning_ref::ArcRef;
@@ -23,9 +22,9 @@ use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use weakref::{Own, Ref, refer};
+use weakref::{Own, refer};
 
-use crate::analysis::{Analysis, start_analysis_thread};
+use crate::analysis::{Analysis, AnalysisCell, start_analysis_thread};
 use crate::model::{Key, ModuleInfo, ModuleSource, PathSplit, TensorInfo, shorten_value};
 use crate::safetensors::Safetensors;
 
@@ -85,7 +84,7 @@ pub struct App {
     selected_panel: Panel,
     pub helptext: String,
     pub path_split: PathSplit,
-    analysis_sender: Option<Sender<Ref<Analysis>>>,
+    analysis_sender: Arc<AnalysisCell>,
     current_analysis: Option<Own<Box<Analysis>>>,
 }
 
@@ -253,7 +252,8 @@ impl App {
 
         // Now that we have the tree, move the source to the analysis thread
         let source = self.source.take().unwrap();
-        self.analysis_sender = Some(start_analysis_thread(source));
+        self.analysis_sender = AnalysisCell::shared();
+        start_analysis_thread(source, Arc::downgrade(&self.analysis_sender));
 
         // Start analysis for the initially selected tensor
         self.update_analysis_for_selected_tensor();
@@ -791,10 +791,6 @@ impl App {
         let Some(tensor_info) = &item.info.tensor_info else {
             return;
         };
-        let Some(sender) = &self.analysis_sender else {
-            return;
-        };
-
         let analysis = Own::new(Box::new(Analysis {
             tensor: tensor_info.clone(),
             histogram: std::sync::OnceLock::new(),
@@ -802,12 +798,7 @@ impl App {
             error: std::sync::OnceLock::new(),
             max_bin_count: 20,
         }));
-
-        let analysis_ref = refer!(analysis);
-        if let Err(_) = sender.try_send(analysis_ref) {
-            // Channel full, ignore
-        }
-
+        self.analysis_sender.set(analysis.refer());
         self.current_analysis = Some(analysis);
     }
 }

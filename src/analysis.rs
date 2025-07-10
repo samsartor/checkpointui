@@ -1,8 +1,8 @@
 use anyhow::{Error, anyhow, bail};
-use crossbeam::channel::{Receiver, Sender};
+use async_cell::sync::{AsyncCell, TakeWeak};
+use futures_lite::future::block_on;
 use rand::seq::SliceRandom;
-use std::panic;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, Weak};
 use weakref::{Ref, pin};
 
 use crate::model::{ModuleSource, TensorInfo};
@@ -212,9 +212,13 @@ fn do_analysis(source: &mut dyn ModuleSource, request: Ref<Analysis>) -> Result<
     Ok(())
 }
 
-pub fn run_analysis_loop(mut source: Box<dyn ModuleSource>, requests: Receiver<Ref<Analysis>>) {
+pub type AnalysisCell = AsyncCell<Ref<Analysis>>;
+
+pub fn run_analysis_loop(mut source: Box<dyn ModuleSource>, requests: Weak<AnalysisCell>) {
     loop {
-        let Ok(request) = requests.recv() else { return };
+        let Some(request) = block_on(TakeWeak(requests.clone())) else {
+            return;
+        };
         match do_analysis(&mut *source, request) {
             Ok(_) => (),
             Err(err) => {
@@ -226,10 +230,8 @@ pub fn run_analysis_loop(mut source: Box<dyn ModuleSource>, requests: Receiver<R
     }
 }
 
-pub fn start_analysis_thread(source: Box<dyn ModuleSource + Send>) -> Sender<Ref<Analysis>> {
-    let (sender, reciever) = crossbeam::channel::bounded(4);
+pub fn start_analysis_thread(source: Box<dyn ModuleSource + Send>, cell: Weak<AnalysisCell>) {
     std::thread::spawn(move || {
-        run_analysis_loop(source, reciever);
+        run_analysis_loop(source, cell);
     });
-    sender
 }
