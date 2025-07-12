@@ -58,10 +58,9 @@ impl Histogram {
         // For large datasets, use random sampling to estimate quantiles
         let sample_data = if data.len() > QUARTILE_SAMPLES {
             let mut rng = rand::thread_rng();
-            let mut sample = data.to_vec();
-            sample.shuffle(&mut rng);
-            sample.truncate(QUARTILE_SAMPLES);
-            sample
+            data.choose_multiple(&mut rng, QUARTILE_SAMPLES)
+                .copied()
+                .collect()
         } else {
             data.to_vec()
         };

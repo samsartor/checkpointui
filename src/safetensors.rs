@@ -1,5 +1,5 @@
-use crate::model::{LE, ModuleInfo, ModuleSource, PathSplit, TensorInfo, TensorSeek, TensorTy};
-use anyhow::{Error, Result, anyhow, bail};
+use crate::model::{LE, ModuleInfo, ModuleSource, PathSplit, TensorInfo, TensorTy};
+use anyhow::{Error, Result, bail};
 use safetensors::{SafeTensorError, tensor::Metadata};
 use serde_json::Value;
 use std::fs::File;
@@ -29,15 +29,10 @@ impl Safetensors<File> {
 }
 
 impl<I: Read + Seek> Safetensors<I> {
-    fn tensor_bytes(&mut self, seek: &TensorSeek) -> Result<Vec<u8>> {
-        let &TensorSeek::InFile { start, end } = seek;
+    fn tensor_bytes(&mut self, start: u64, nbytes: usize) -> Result<Vec<u8>> {
         self.io
             .seek(std::io::SeekFrom::Start(start + self.data_offset))?;
-        let mut data = vec![
-            0;
-            end.checked_sub(start)
-                .ok_or(anyhow!("tensor ends before start"))? as usize
-        ];
+        let mut data = vec![0; nbytes];
         self.io.read_exact(&mut data)?;
         Ok(data)
     }
@@ -51,7 +46,7 @@ impl<I: Read + Seek> ModuleSource for Safetensors<I> {
         Ok(ModuleInfo::build_from_tensors(
             tensors
                 .iter()
-                .map(|(name, &info)| (name.clone(), TensorInfo::from(info))),
+                .map(|(name, &info)| (name.clone(), info.into())),
             split,
         ))
     }
@@ -77,7 +72,7 @@ impl<I: Read + Seek> ModuleSource for Safetensors<I> {
         tensor: TensorInfo,
         _cancel: Ref<()>,
     ) -> std::result::Result<Vec<f32>, Error> {
-        tensor.read_f32::<LE>(&self.tensor_bytes(&tensor.seek)?)
+        tensor.read_f32::<LE>(&self.tensor_bytes(tensor.offset, tensor.size as usize)?)
     }
 
     fn tensor_f64(
@@ -85,7 +80,7 @@ impl<I: Read + Seek> ModuleSource for Safetensors<I> {
         tensor: TensorInfo,
         _cancel: Ref<()>,
     ) -> std::result::Result<Vec<f64>, Error> {
-        tensor.read_f64::<LE>(&self.tensor_bytes(&tensor.seek)?)
+        tensor.read_f64::<LE>(&self.tensor_bytes(tensor.offset, tensor.size as usize)?)
     }
 }
 
@@ -113,15 +108,12 @@ impl From<safetensors::Dtype> for TensorTy {
 }
 
 impl From<&'_ safetensors::tensor::TensorInfo> for TensorInfo {
-    fn from(value: &safetensors::tensor::TensorInfo) -> Self {
+    fn from(value: &'_ safetensors::tensor::TensorInfo) -> TensorInfo {
         TensorInfo {
             ty: value.dtype.into(),
             shape: value.shape.iter().map(|&x| x as u64).collect(),
-            size: value.data_offsets.1.saturating_sub(value.data_offsets.0) as u64,
-            seek: TensorSeek::InFile {
-                start: value.data_offsets.0 as u64,
-                end: value.data_offsets.1 as u64,
-            },
+            size: value.data_offsets.1.saturating_sub(value.data_offsets.0),
+            offset: value.data_offsets.0 as u64,
         }
     }
 }

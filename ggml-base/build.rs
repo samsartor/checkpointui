@@ -4,10 +4,14 @@ pub fn main() {
     use cmake;
     use cmake::Config;
 
-    let dst = Config::new("ggml").build_target("ggml-base").build();
+    let dst = Config::new("ggml")
+        .build_target("ggml-base")
+        .define("BUILD_SHARED_LIBS", "OFF")
+        .build();
+    let lib_path = dst.join("build").join("src");
 
-    println!("cargo:rustc-link-search=native={}", dst.display());
-    println!("cargo:rustc-link-lib=static=libggml-base");
+    println!("cargo:rustc-link-search=native={}", lib_path.display());
+    println!("cargo:rustc-link-lib=static=ggml-base");
 
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")

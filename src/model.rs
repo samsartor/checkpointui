@@ -16,12 +16,15 @@ pub enum TensorTy {
     F8_E4M3,
     I16,
     U16,
+    I32,
+    U32,
     F16,
     BF16,
     F32,
     F64,
     I64,
     U64,
+    Ggml(ggml_base::GgmlTypeId),
     Unknown(String),
 }
 
@@ -36,12 +39,15 @@ impl fmt::Display for TensorTy {
             F8_E4M3 => "F8_E4M3",
             I16 => "I16",
             U16 => "U16",
+            I32 => "I32",
+            U32 => "U32",
             F16 => "F16",
             BF16 => "BF16",
             F32 => "F32",
             F64 => "F64",
             I64 => "I64",
             U64 => "U64",
+            Ggml(ty) => ggml_base::get_type_name(*ty).expect("{ty} is not a valid ggml type"),
             Unknown(text) => text,
         };
         write!(f, "{}", text,)
@@ -49,16 +55,11 @@ impl fmt::Display for TensorTy {
 }
 
 #[derive(Debug, Clone)]
-pub enum TensorSeek {
-    InFile { start: u64, end: u64 },
-}
-
-#[derive(Debug, Clone)]
 pub struct TensorInfo {
     pub ty: TensorTy,
     pub shape: Vec<u64>,
-    pub size: u64,
-    pub seek: TensorSeek,
+    pub size: usize,
+    pub offset: u64,
 }
 
 pub trait ByteOrder {
@@ -117,27 +118,32 @@ where
 impl TensorInfo {
     pub fn read_f32<O: ByteOrder>(&self, bytes: &[u8]) -> Result<Vec<f32>, Error> {
         use TensorTy::*;
-        Ok(match &self.ty {
+        Ok(match self.ty {
             F32 => convertbytes::<f32, _, O>(bytes, |x| x),
             F64 => convertbytes::<f64, _, O>(bytes, |x| x as f32),
             F16 => convertbytes::<half::f16, _, O>(bytes, |x| x.into()),
             BF16 => convertbytes::<half::bf16, _, O>(bytes, |x| x.into()),
             F8_E4M3 => convertbytes::<float8::F8E4M3, _, O>(bytes, |x| x.into()),
             F8_E5M2 => convertbytes::<float8::F8E5M2, _, O>(bytes, |x| x.into()),
-            other => bail!("unsupported tensor type {other:?}"),
+            Ggml(ty) => ggml_base::dequantize(ty, &self.shape, bytes)?,
+            ref other => bail!("unsupported tensor type {other:?}"),
         })
     }
 
     pub fn read_f64<O: ByteOrder>(&self, bytes: &[u8]) -> Result<Vec<f64>, Error> {
         use TensorTy::*;
-        Ok(match &self.ty {
+        Ok(match self.ty {
             F32 => convertbytes::<f32, _, O>(bytes, |x| x as f64),
             F64 => convertbytes::<f64, _, O>(bytes, |x| x),
             F16 => convertbytes::<half::f16, _, O>(bytes, |x| x.into()),
             BF16 => convertbytes::<half::bf16, _, O>(bytes, |x| x.into()),
             F8_E4M3 => convertbytes::<float8::F8E4M3, _, O>(bytes, |x| x.into()),
             F8_E5M2 => convertbytes::<float8::F8E5M2, _, O>(bytes, |x| x.into()),
-            other => bail!("unsupported tensor type {other:?}"),
+            Ggml(ty) => ggml_base::dequantize(ty, &self.shape, bytes)?
+                .into_iter()
+                .map(|x| x as f64)
+                .collect(),
+            ref other => bail!("unsupported tensor type {other:?}"),
         })
     }
 }

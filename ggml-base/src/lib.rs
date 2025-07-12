@@ -54,14 +54,18 @@ impl GgufFile {
         ensure!(header == [b'G', b'G', b'U', b'F'], "not a gguf file");
         let version = read.read_u32::<O>()?;
         ensure!(version == 3, "not a version 3 gguf file");
+
         let tensor_count = read.read_u64::<O>()?;
         let kv_count = read.read_u64::<O>()?;
+        dbg!(tensor_count, kv_count);
         let mut metadata = HashMap::with_capacity(kv_count as usize);
         for _ in 0..kv_count {
             let k = read_gguf_string::<O>(&mut read)?;
             let v = GgufValue::read::<O>(&mut read)?;
+            dbg!(&k);
             metadata.insert(k, v);
         }
+
         let mut tensors = Vec::with_capacity(tensor_count as usize);
         for _ in 0..tensor_count {
             tensors.push(GgmlTensorInfo::read::<O>(&mut read)?);
@@ -69,7 +73,7 @@ impl GgufFile {
 
         let alignment = match metadata.get("general.alignment") {
             Some(GgufValue::Uint32(a)) => *a as u64,
-            _ => bail!("no general.alignment metadata"),
+            _ => 32,
         };
         let padding = (alignment - read.pos % alignment) % alignment;
 
@@ -81,15 +85,16 @@ impl GgufFile {
     }
 }
 
-pub enum GgmlUnquantizedType {
-    I8,
-    I16,
-    I32,
-    I64,
-    F64,
-    F32,
-}
+pub const I8: GgmlTypeId = sys::ggml_type_GGML_TYPE_I8;
+pub const I16: GgmlTypeId = sys::ggml_type_GGML_TYPE_I16;
+pub const I32: GgmlTypeId = sys::ggml_type_GGML_TYPE_I32;
+pub const I64: GgmlTypeId = sys::ggml_type_GGML_TYPE_I64;
+pub const F16: GgmlTypeId = sys::ggml_type_GGML_TYPE_F16;
+pub const BF16: GgmlTypeId = sys::ggml_type_GGML_TYPE_BF16;
+pub const F32: GgmlTypeId = sys::ggml_type_GGML_TYPE_F32;
+pub const F64: GgmlTypeId = sys::ggml_type_GGML_TYPE_F64;
 
+#[derive(Debug, Clone, PartialEq)]
 pub enum GgufValue {
     Uint8(u8),
     Int8(i8),
@@ -140,13 +145,15 @@ impl GgufValue {
     }
 }
 
+pub type GgmlTypeId = sys::ggml_type;
+
 pub struct GgmlTensorInfo {
     pub name: String,
-    ty: u32,
-    ty_name: &'static str,
-    shape: Vec<u64>,
-    nbytes: u64,
-    offset: u64,
+    pub ty: GgmlTypeId,
+    pub ty_name: &'static str,
+    pub shape: Vec<u64>,
+    pub nbytes: usize,
+    pub offset: u64,
 }
 
 impl GgmlTensorInfo {
@@ -172,89 +179,79 @@ impl GgmlTensorInfo {
         Ok(this)
     }
 
-    fn traits_from_ggml(&self) -> Result<&'static sys::ggml_type_traits, Error> {
-        ensure!(
-            self.ty < sys::ggml_type_GGML_TYPE_COUNT,
-            "ggml type={} is too large",
-            self.ty
-        );
-        let traits = unsafe { sys::ggml_get_type_traits(self.ty) };
-        ensure!(
-            !traits.is_null(),
-            "ggml has no information for type={}",
-            self.ty
-        );
-        let traits: &'static _ = unsafe { &*traits };
-        Ok(traits)
-    }
-
     fn update_from_ggml(&mut self) -> Result<(), Error> {
-        let traits = self.traits_from_ggml()?;
-        let ty_name: &'static _ = unsafe { CStr::from_ptr(traits.type_name) };
-        self.ty_name = ty_name.to_str()?;
-
-        let blck_size: u64 = traits.blck_size as u64;
-        let type_size: u64 = traits.type_size as u64;
-        ensure!(blck_size > 0, self.ty_name);
-        ensure!(type_size > 0, self.ty_name);
-
-        let mut stride = unsafe { sys::ggml_type_size(self.ty) } as u64;
-        let mut ne = self.shape.iter().rev().copied();
-        stride = stride * ne.next().ok_or_else(|| anyhow!("empty shape"))? / blck_size;
-        for ne in ne {
-            stride = stride
-                .checked_mul(ne)
-                .ok_or_else(|| anyhow!("tensor size overflowed"))?;
-        }
-        self.nbytes = stride;
+        let (_traits, ty_name, nbytes) = get_type_and_size(self.ty, &self.shape)?;
+        self.ty_name = ty_name;
+        self.nbytes = nbytes;
         Ok(())
-    }
-
-    pub fn unquantized(&self) -> Option<GgmlUnquantizedType> {
-        use GgmlUnquantizedType::*;
-        match self.ty {
-            sys::ggml_type_GGML_TYPE_I8 => Some(I8),
-            sys::ggml_type_GGML_TYPE_I16 => Some(I16),
-            sys::ggml_type_GGML_TYPE_I32 => Some(I32),
-            sys::ggml_type_GGML_TYPE_I64 => Some(I64),
-            sys::ggml_type_GGML_TYPE_F32 => Some(F32),
-            sys::ggml_type_GGML_TYPE_F64 => Some(F64),
-            _ => None,
-        }
-    }
-
-    pub fn start(&self) -> usize {
-        self.offset as usize
-    }
-
-    pub fn end(&self) -> usize {
-        (self.offset + self.nbytes) as usize
-    }
-
-    pub fn nbytes(&self) -> usize {
-        self.nbytes as usize
-    }
-
-    pub fn shape(&self) -> &[u64] {
-        &self.shape
     }
 
     pub fn nelements(&self) -> usize {
         self.shape.iter().copied().product::<u64>() as usize
     }
+}
 
-    pub fn type_name(&self) -> &'static str {
-        self.ty_name
+fn get_type_traits(ty: GgmlTypeId) -> Option<&'static sys::ggml_type_traits> {
+    if ty >= sys::ggml_type_GGML_TYPE_COUNT {
+        return None;
+    }
+    let traits = unsafe { sys::ggml_get_type_traits(ty) };
+    if traits.is_null() {
+        return None;
+    }
+    let traits: &'static _ = unsafe { &*traits };
+    Some(traits)
+}
+
+fn get_type_and_size(
+    ty: GgmlTypeId,
+    shape: &[u64],
+) -> Result<(&'static sys::ggml_type_traits, &'static str, usize), Error> {
+    let traits = get_type_traits(ty).ok_or_else(|| anyhow!("{} is not a a valid ggml type", ty))?;
+    let ty_name: &'static _ = unsafe { CStr::from_ptr(traits.type_name) };
+    let ty_name = ty_name.to_str()?;
+
+    let blck_size: u64 = traits.blck_size as u64;
+    let type_size: u64 = traits.type_size as u64;
+    ensure!(blck_size > 0, ty_name);
+    ensure!(type_size > 0, ty_name);
+
+    let mut stride = unsafe { sys::ggml_type_size(ty) } as u64;
+    let mut ne = shape.iter().rev().copied();
+    stride = stride * ne.next().ok_or_else(|| anyhow!("empty shape"))? / blck_size;
+    for ne in ne {
+        stride = stride
+            .checked_mul(ne)
+            .ok_or_else(|| anyhow!("tensor size overflowed"))?;
     }
 
-    pub fn dequantize(&mut self, data: &[u16]) -> Option<Vec<f32>> {
-        assert!(data.len() == self.nbytes() / 2);
-        let k = self.nelements();
-        let mut floats = vec![0f32; k];
-        let dequantize = self.traits_from_ggml().unwrap().to_float?;
-        unsafe { dequantize(data.as_ptr() as _, floats.as_mut_ptr() as _, k as i64) };
-        Some(floats)
+    Ok((traits, ty_name, stride.try_into()?))
+}
+
+pub fn get_type_name(ty: GgmlTypeId) -> Option<&'static str> {
+    let traits = get_type_traits(ty)?;
+    let ty_name: &'static _ = unsafe { CStr::from_ptr(traits.type_name) };
+    ty_name.to_str().ok()
+}
+
+pub fn dequantize(ty: GgmlTypeId, shape: &[u64], bytes: &[u8]) -> Result<Vec<f32>, Error> {
+    let (traits, ty_name, nbytes) = get_type_and_size(ty, shape)?;
+    let nelements = shape.iter().copied().product::<u64>();
+    if nelements == 0 {
+        return Ok(Vec::new());
     }
+    ensure!(
+        bytes.len() >= nbytes,
+        "buffer has length {} (expected {})",
+        bytes.len(),
+        nbytes
+    );
+    let to_float = traits
+        .to_float
+        .ok_or_else(|| anyhow!("{ty_name} has no dequantization method"))?;
+    let mut floats = vec![0f32; nelements as usize];
+    unsafe { to_float(bytes.as_ptr() as _, floats.as_mut_ptr(), nelements as i64) };
+    Ok(floats)
 }
 
 #[cfg(feature = "serde_json")]

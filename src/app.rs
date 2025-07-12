@@ -1,4 +1,4 @@
-use anyhow::Error;
+use anyhow::{Error, bail};
 use human_format::{Formatter, Scales};
 use lexical_sort::natural_lexical_cmp;
 use owning_ref::ArcRef;
@@ -25,6 +25,7 @@ use std::time::Duration;
 use weakref::{Own, refer};
 
 use crate::analysis::{Analysis, AnalysisCell, start_analysis_thread};
+use crate::gguf::Gguf;
 use crate::model::{Key, ModuleInfo, ModuleSource, PathSplit, TensorInfo, shorten_value};
 use crate::safetensors::Safetensors;
 
@@ -227,7 +228,14 @@ impl App {
     }
 
     pub fn load_file(&mut self, file_path: PathBuf) -> Result<(), Error> {
-        self.source = Some(Box::new(Safetensors::open_file(&file_path)?));
+        let ext = file_path.extension().and_then(|ext| ext.to_str());
+        if ext == Some("safetensors") {
+            self.source = Some(Box::new(Safetensors::open_file(&file_path)?));
+        } else if ext == Some("gguf") {
+            self.source = Some(Box::new(Gguf::open_file(&file_path)?));
+        } else {
+            bail!("could not infer file type");
+        }
         self.file_path = Some(file_path);
         self.rebuild_module()
     }
@@ -456,7 +464,7 @@ impl App {
                 if let Some(tensor_info) = &item.info.tensor_info {
                     spans.push(format!(" {:?}", tensor_info.shape).fg(SHAPE_FG));
                     spans.push(format!(" {}", tensor_info.ty).fg(DTYPE_FG));
-                    let size = self.format_bytes(tensor_info.size);
+                    let size = self.format_bytes(tensor_info.size as u64);
                     spans.push(format!(" {size}").fg(BYTESIZE_FG));
                 }
 
@@ -497,7 +505,7 @@ impl App {
                 ]);
                 text.push_line(vec![
                     "Data Type: ".bold(),
-                    format!("{:?}", tensor_info.ty).fg(DTYPE_FG),
+                    format!("{}", tensor_info.ty).fg(DTYPE_FG),
                 ]);
                 text.push_line(vec![
                     "Parameters: ".bold(),
@@ -505,7 +513,7 @@ impl App {
                 ]);
                 text.push_line(vec![
                     "Size: ".bold(),
-                    self.format_bytes(tensor_info.size).fg(BYTESIZE_FG),
+                    self.format_bytes(tensor_info.size as u64).fg(BYTESIZE_FG),
                 ]);
                 "Tensor Info"
             } else {
