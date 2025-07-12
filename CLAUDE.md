@@ -4,24 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Rust TUI application for inspecting safetensors files.
+This is a Rust TUI application for inspecting safetensors/gguf files.
 
 ## Architecture
 
 The codebase consists of:
-- Main TUI application (`src/main.rs`)
-- Reference implementation (`lssafetensors.rs`) - standalone script showing safetensors parsing and tree building logic
-
-The reference script demonstrates the core data structures and algorithms needed:
-- `ModuleInfo` struct for tree nodes with parameter counts
-- Tree building from tensor names using dot notation parsing
-- Hierarchical parameter counting and display formatting
+- The entrypoint (`src/main.rs`)
+- Main TUI application (`src/app.rs`)
+- Utils for understanding checkpoint files (`src/model.rs`)
+- Generates statistics from huge arrays of f32s  (`src/analysis.rs`)
+- Safetensors-specific logic (`src/safetensors.rs`)
+- GGUF-specific logic (`src/gguf.rs`)
+- Unsafe wrapper around the ggml library, mainly for dequantization (`ggml-base`)
+- The ggml library dependency - don't look here unless instructed (`ggml-base/ggml`)
 
 ## Key Design Requirements
 
 The TUI should implement a two-panel layout:
-- Left panel: Interactive module tree with arrow key navigation
-- Right panel: Info display showing metadata
+- Left-most panel: Interactive module tree with arrow key navigation
+- Right panels: Info display showing metadata and tensor analysis
 
 Navigation behavior:
 - Arrow keys for tree traversal (up/down for selection, right to enter modules, left to go up levels)
@@ -42,11 +43,6 @@ Build release:
 cargo build --release
 ```
 
-Run the reference script:
-```bash
-./lssafetensors.rs <safetensors_file>
-```
-
 ## Dependencies
 
-The project uses ratatui for the TUI interface and safetensors parsing dependencies from the reference script.
+The project uses ratatui for the TUI interface

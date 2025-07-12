@@ -6,7 +6,6 @@ use std::io::Read;
 
 pub mod sys {
     #![allow(warnings)]
-
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
@@ -57,12 +56,10 @@ impl GgufFile {
 
         let tensor_count = read.read_u64::<O>()?;
         let kv_count = read.read_u64::<O>()?;
-        dbg!(tensor_count, kv_count);
         let mut metadata = HashMap::with_capacity(kv_count as usize);
         for _ in 0..kv_count {
             let k = read_gguf_string::<O>(&mut read)?;
             let v = GgufValue::read::<O>(&mut read)?;
-            dbg!(&k);
             metadata.insert(k, v);
         }
 

@@ -41,7 +41,7 @@ enum Panel {
 impl Panel {
     fn next(self, analysis: bool) -> Self {
         match self {
-            Panel::Tree => Panel::SelectedInfo,
+            Panel::Tree => Panel::FileInfo,
             Panel::SelectedInfo => Panel::FileInfo,
             Panel::FileInfo if analysis => Panel::Analysis,
             Panel::FileInfo => Panel::Tree,
@@ -54,7 +54,7 @@ impl Panel {
             Panel::Tree if analysis => Panel::Analysis,
             Panel::Tree => Panel::FileInfo,
             Panel::SelectedInfo => Panel::Tree,
-            Panel::FileInfo => Panel::SelectedInfo,
+            Panel::FileInfo => Panel::Tree,
             Panel::Analysis => Panel::FileInfo,
         }
     }
