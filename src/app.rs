@@ -646,13 +646,21 @@ impl App {
         f.render_widget(info, area);
     }
 
-    fn render_file_info_panel(&self, f: &mut ratatui::Frame, area: Rect) {
-        let Some(tree) = &self.tree_state else { return };
+    fn render_file_meta_tree_panel(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        let Some(module_tree) = &self.tree_state else { return };
 
-        let mut text = Text::default();
+        // Split the area into file info and metadata tree
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(5), // File info (3 lines + 2 for borders)
+                Constraint::Min(1),    // Metadata tree
+            ])
+            .split(area);
 
-        // File info section
-        text.push_line(vec![
+        // Render file info in top section
+        let mut file_info = Text::default();
+        file_info.push_line(vec![
             "Path: ".bold(),
             self.file_path
                 .as_ref()
@@ -661,85 +669,73 @@ impl App {
                 .to_string()
                 .fg(TENSOR_FG),
         ]);
-        text.push_line(vec![
+        file_info.push_line(vec![
             "Total Tensors: ".bold(),
-            tree.data.total_tensors.to_string().fg(COUNT_FG),
+            module_tree.data.total_tensors.to_string().fg(COUNT_FG),
         ]);
-        text.push_line(vec![
+        file_info.push_line(vec![
             "Total Parameters: ".bold(),
-            self.format_count(tree.data.total_params).fg(COUNT_FG),
+            self.format_count(module_tree.data.total_params).fg(COUNT_FG),
         ]);
 
-        // Add metadata section if available
-        if self.extra_metadata.is_some() {
-            if let Ok(mut metadata_text) = ansi_to_tui::IntoText::into_text(&self.formatted_extra) {
-                if let Some(first) = metadata_text.lines.get_mut(0) {
-                    first.spans.insert(0, "Metadata: ".bold());
-                    text.extend(metadata_text);
-                }
-            }
+        let file_info_widget = Paragraph::new(file_info)
+            .block(Block::default().borders(Borders::ALL).title("File Info"))
+            .style(Style::default().fg(Color::White));
+        f.render_widget(file_info_widget, chunks[0]);
+
+        // Render metadata tree in bottom section
+        if let Some(tree) = &self.meta_tree_state {
+            let lines: Vec<Line> = tree
+                .visible_items
+                .iter()
+                .map(|item| {
+                    let mut spans = Vec::new();
+
+                    // Indentation
+                    if item.depth > 0 {
+                        spans.push("  ".repeat(item.depth as usize).into());
+                    }
+
+                    // Icon
+                    let icon_span = if item.has_children() {
+                        if item.is_expanded { "▼ " } else { "▶ " }
+                    } else {
+                        "📄 "
+                    }
+                    .into();
+                    spans.push(icon_span);
+
+                    // Name
+                    let name_span = if item.has_children() {
+                        item.name.as_str().fg(MODULE_FG).bold()
+                    } else {
+                        item.name.as_str().fg(TENSOR_FG)
+                    };
+                    spans.push(name_span);
+
+                    // Value (for leaf nodes)
+                    if !item.has_children() {
+                        let value_text = format!(" = {:?}", &*item.info);
+                        spans.push(value_text.fg(Color::Gray));
+                    }
+
+                    Line::from(spans)
+                })
+                .collect();
+
+            let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
+
+            let list = List::new(items)
+                .block(self.format_block("Metadata", Panel::FileInfo))
+                .style(Style::default().fg(Color::White))
+                .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+            list.render(chunks[1], f.buffer_mut(), &mut *tree.list_state.borrow_mut());
+        } else {
+            let no_metadata = Paragraph::new("No metadata available")
+                .block(self.format_block("Metadata", Panel::FileInfo))
+                .style(Style::default().fg(Color::Gray));
+            f.render_widget(no_metadata, chunks[1]);
         }
-
-        let info = Paragraph::new(text)
-            .block(self.format_block("File Info", Panel::FileInfo))
-            .style(Style::default().fg(Color::White))
-            .wrap(Wrap { trim: false });
-
-        f.render_widget(info, area);
-    }
-
-    fn render_file_meta_tree_panel(&mut self, f: &mut ratatui::Frame, area: Rect) {
-        let Some(tree) = &self.meta_tree_state else {
-            return;
-        };
-
-        let lines: Vec<Line> = tree
-            .visible_items
-            .iter()
-            .map(|item| {
-                let mut spans = Vec::new();
-
-                // Indentation
-                if item.depth > 0 {
-                    spans.push("  ".repeat(item.depth as usize).into());
-                }
-
-                // Icon
-                let icon_span = if item.has_children() {
-                    if item.is_expanded { "▼ " } else { "▶ " }
-                } else {
-                    "📄 "
-                }
-                .into();
-                spans.push(icon_span);
-
-                // Name
-                let name_span = if item.has_children() {
-                    item.name.as_str().fg(MODULE_FG).bold()
-                } else {
-                    item.name.as_str().fg(TENSOR_FG)
-                };
-                spans.push(name_span);
-
-                // Value (for leaf nodes)
-                if !item.has_children() {
-                    let value_text = format!(" = {:?}", &*item.info);
-                    spans.push(value_text.fg(Color::Gray));
-                }
-
-                Line::from(spans)
-            })
-            .collect();
-
-        let title: Line = "Metadata".into();
-
-        let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
-
-        let list = List::new(items)
-            .block(self.format_block(title, Panel::FileInfo))
-            .style(Style::default().fg(Color::White))
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
-        list.render(area, f.buffer_mut(), &mut *tree.list_state.borrow_mut());
     }
 
     fn format_block<'a>(&self, title: impl Into<Line<'a>>, panel: Panel) -> Block<'a> {
