@@ -27,8 +27,78 @@ use weakref::Own;
 
 use crate::analysis::{Analysis, AnalysisCell, start_analysis_thread};
 use crate::gguf::Gguf;
-use crate::model::{Key, ModuleInfo, ModuleSource, PathSplit, shorten_value};
+use crate::model::{ModuleInfo, ModuleSource, PathSplit, shorten_value};
 use crate::safetensors::Safetensors;
+
+pub trait TreeData: Send + Sync {
+    fn has_children(&self) -> bool;
+    fn children(this: ArcRef<Self>) -> Box<dyn Iterator<Item=(String, ArcRef<Self>)>>;
+}
+
+impl TreeData for ModuleInfo {
+    fn has_children(&self) -> bool {
+        !self.children.is_empty()
+    }
+
+    fn children(this: ArcRef<Self>) -> Box<dyn Iterator<Item=(String, ArcRef<Self>)>> {
+        let keys: Vec<_> = this.children.keys().cloned().collect();
+        Box::new(keys.into_iter().map(move |key| {
+            let child = this.clone().map(|m| &m.children[&key]);
+            (key.to_string(), child)
+        }))
+    }
+}
+
+impl ModuleInfo {
+    pub fn is_tensor(&self) -> bool {
+        self.tensor_info.is_some()
+    }
+}
+
+impl TreeData for Value {
+    fn has_children(&self) -> bool {
+        match self {
+            Value::Object(map) => !map.is_empty(),
+            Value::Array(arr) => !arr.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn children(this: ArcRef<Self>) -> Box<dyn Iterator<Item=(String, ArcRef<Self>)>> {
+        match &*this {
+            Value::Object(map) => {
+                let keys: Vec<_> = map.keys().cloned().collect();
+                let iter: Box<dyn Iterator<Item=(String, ArcRef<Self>)>> = Box::new(
+                    keys.into_iter().map(move |key| {
+                        let child = this.clone().map(|v| match v {
+                            Value::Object(map) => &map[&key],
+                            _ => unreachable!(),
+                        });
+                        (key, child)
+                    })
+                );
+                iter
+            }
+            Value::Array(arr) => {
+                let len = arr.len();
+                let iter: Box<dyn Iterator<Item=(String, ArcRef<Self>)>> = Box::new(
+                    (0..len).map(move |i| {
+                        let child = this.clone().map(|v| match v {
+                            Value::Array(arr) => &arr[i],
+                            _ => unreachable!(),
+                        });
+                        (format!("[{}]", i), child)
+                    })
+                );
+                iter
+            }
+            _ => {
+                let iter: Box<dyn Iterator<Item=(String, ArcRef<Self>)>> = Box::new(std::iter::empty());
+                iter
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 enum Panel {
@@ -77,7 +147,8 @@ pub const BYTESIZE_FG: Color = Color::Magenta;
 pub struct App {
     should_quit: bool,
     file_path: Option<PathBuf>,
-    tree_state: Option<TreeState>,
+    tree_state: Option<TreeState<ModuleInfo>>,
+    meta_tree_state: Option<TreeState<Value>>,
     extra_metadata: Option<Value>,
     source: Option<Box<dyn ModuleSource + Send>>,
     formatted_extra: String,
@@ -92,34 +163,30 @@ pub struct App {
     spectrum_size_limit: u64,
 }
 
-struct TreeState {
-    data: ArcRef<ModuleInfo>,
-    data_history: Vec<ArcRef<ModuleInfo>>,
-    expanded: HashSet<Key>,
-    visible_items: Vec<TreeItem>,
+struct TreeState<T: TreeData> {
+    data: ArcRef<T>,
+    data_history: Vec<ArcRef<T>>,
+    expanded: HashSet<String>,
+    visible_items: Vec<TreeItem<T>>,
     list_state: RefCell<ListState>,
 }
 
 #[derive(Clone)]
-struct TreeItem {
+struct TreeItem<T: TreeData> {
     name: String,
     depth: i32,
     is_expanded: bool,
-    info: ArcRef<ModuleInfo>,
+    info: ArcRef<T>,
 }
 
-impl TreeItem {
+impl<T: TreeData> TreeItem<T> {
     pub fn has_children(&self) -> bool {
-        !self.info.children.is_empty()
-    }
-
-    pub fn is_tensor(&self) -> bool {
-        self.info.tensor_info.is_some()
+        self.info.has_children()
     }
 }
 
-impl TreeState {
-    fn new(root: ArcRef<ModuleInfo>) -> Self {
+impl<T: TreeData> TreeState<T> {
+    fn new(root: ArcRef<T>) -> Self {
         Self {
             data: root,
             data_history: Vec::new(),
@@ -133,19 +200,16 @@ impl TreeState {
         self.visible_items.clear();
         let mut stack = vec![(self.data.clone(), "".to_string(), -1)];
         while let Some((info, name, depth)) = stack.pop() {
-            let is_expanded = depth < 0 || self.expanded.contains(&info.full_name);
+            let full_name = if depth < 0 { String::new() } else { name.clone() };
+            let is_expanded = depth < 0 || self.expanded.contains(&full_name);
             if is_expanded {
                 let stack_at = stack.len();
-                for key in info.children.keys() {
-                    let child = info.clone().map(|m| &m.children[key]);
-                    stack.push((child, key.to_string(), depth + 1));
+                for (key, child) in T::children(info.clone()) {
+                    stack.push((child, key, depth + 1));
                 }
-                stack[stack_at..].sort_by(|(a_info, a_name, ..), (b_info, b_name, ..)| {
-                    a_info
-                        .tensor_info
-                        .is_some()
-                        .cmp(&b_info.tensor_info.is_some())
-                        .then(natural_lexical_cmp(b_name, a_name))
+                // Sort by name for now - we'll make this more sophisticated later
+                stack[stack_at..].sort_by(|(_, a_name, ..), (_, b_name, ..)| {
+                    natural_lexical_cmp(b_name, a_name)
                 });
             }
             if depth >= 0 {
@@ -169,10 +233,10 @@ impl TreeState {
         if !item.has_children() {
             return;
         }
-        if self.expanded.contains(&item.info.full_name) {
-            self.expanded.remove(&item.info.full_name);
+        if self.expanded.contains(&item.name) {
+            self.expanded.remove(&item.name);
         } else {
-            self.expanded.insert(item.info.full_name.clone());
+            self.expanded.insert(item.name.clone());
         }
     }
 
@@ -265,6 +329,13 @@ impl App {
         state.rebuild_visible_items();
         self.tree_state = Some(state);
 
+        // Create metadata tree state
+        if let Some(metadata) = &self.extra_metadata {
+            let mut meta_state = TreeState::new(Arc::new(metadata.clone()).into());
+            meta_state.rebuild_visible_items();
+            self.meta_tree_state = Some(meta_state);
+        }
+
         // Now that we have the tree, move the source to the analysis thread
         let source = self.source.take().unwrap();
         let sender = self
@@ -314,6 +385,34 @@ impl App {
                 }
                 (KeyCode::Char('y'), _, _) => {
                     self.handle_y_key();
+                }
+
+                // FileInfo panel controls (metadata tree)
+                (KeyCode::Up, Panel::FileInfo, _) => {
+                    if let Some(s) = &mut self.meta_tree_state {
+                        s.move_up();
+                    }
+                }
+                (KeyCode::Down, Panel::FileInfo, _) => {
+                    if let Some(s) = &mut self.meta_tree_state {
+                        s.move_down();
+                    }
+                }
+                (KeyCode::Left, Panel::FileInfo, _) => {
+                    if let Some(s) = &mut self.meta_tree_state {
+                        s.move_left();
+                    }
+                }
+                (KeyCode::Right, Panel::FileInfo, _) => {
+                    if let Some(s) = &mut self.meta_tree_state {
+                        s.move_right();
+                    }
+                }
+                (KeyCode::Char(' ') | KeyCode::Enter, Panel::FileInfo, _) => {
+                    if let Some(s) = &mut self.meta_tree_state {
+                        s.toggle_expanded();
+                        s.rebuild_visible_items();
+                    }
                 }
 
                 // Analysis panel controls (currently read-only)
@@ -377,13 +476,13 @@ impl App {
                 let info_chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Percentage(50), // Selected item info
-                        Constraint::Percentage(50), // File info
+                        Constraint::Percentage(25), // Selected item info
+                        Constraint::Percentage(75), // File info
                     ])
                     .split(main_chunks[1]);
 
                 self.render_selected_info_panel(f, info_chunks[0]);
-                self.render_file_info_panel(f, info_chunks[1]);
+                self.render_file_meta_tree_panel(f, info_chunks[1]);
                 self.render_analysis_panel(f, main_chunks[2]);
             } else {
                 // Two-panel layout when module is selected
@@ -401,13 +500,13 @@ impl App {
                 let info_chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Percentage(50), // Selected item info
-                        Constraint::Percentage(50), // File info
+                        Constraint::Percentage(25), // Selected item info
+                        Constraint::Percentage(75), // File info
                     ])
                     .split(main_chunks[1]);
 
                 self.render_selected_info_panel(f, info_chunks[0]);
-                self.render_file_info_panel(f, info_chunks[1]);
+                self.render_file_meta_tree_panel(f, info_chunks[1]);
             }
         } else {
             let help = Paragraph::new(self.helptext.as_str())
@@ -448,7 +547,7 @@ impl App {
                 // Icon
                 let icon_span = if item.has_children() {
                     if item.is_expanded { "▼ " } else { "▶ " }
-                } else if item.is_tensor() {
+                } else if item.info.is_tensor() {
                     "📄 "
                 } else {
                     "  "
@@ -457,7 +556,7 @@ impl App {
                 spans.push(icon_span);
 
                 // Name
-                let name_span = if item.is_tensor() {
+                let name_span = if item.info.is_tensor() {
                     item.name.as_str().fg(TENSOR_FG)
                 } else if item.has_children() {
                     item.name.as_str().fg(MODULE_FG).bold()
@@ -482,11 +581,7 @@ impl App {
             })
             .collect();
 
-        let mut title: Line = "Module Tree".into();
-        if !tree.data.full_name.is_empty() {
-            title += " - ".into();
-            title += tree.data.full_name.fg(MODULE_FG)
-        };
+        let title: Line = "Module Tree".into();
 
         let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
 
@@ -593,6 +688,60 @@ impl App {
         f.render_widget(info, area);
     }
 
+    fn render_file_meta_tree_panel(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        let Some(tree) = &self.meta_tree_state else {
+            return;
+        };
+
+        let lines: Vec<Line> = tree
+            .visible_items
+            .iter()
+            .map(|item| {
+                let mut spans = Vec::new();
+
+                // Indentation
+                if item.depth > 0 {
+                    spans.push("  ".repeat(item.depth as usize).into());
+                }
+
+                // Icon
+                let icon_span = if item.has_children() {
+                    if item.is_expanded { "▼ " } else { "▶ " }
+                } else {
+                    "📄 "
+                }
+                .into();
+                spans.push(icon_span);
+
+                // Name
+                let name_span = if item.has_children() {
+                    item.name.as_str().fg(MODULE_FG).bold()
+                } else {
+                    item.name.as_str().fg(TENSOR_FG)
+                };
+                spans.push(name_span);
+
+                // Value (for leaf nodes)
+                if !item.has_children() {
+                    let value_text = format!(" = {:?}", &*item.info);
+                    spans.push(value_text.fg(Color::Gray));
+                }
+
+                Line::from(spans)
+            })
+            .collect();
+
+        let title: Line = "Metadata".into();
+
+        let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
+
+        let list = List::new(items)
+            .block(self.format_block(title, Panel::FileInfo))
+            .style(Style::default().fg(Color::White))
+            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+        list.render(area, f.buffer_mut(), &mut *tree.list_state.borrow_mut());
+    }
+
     fn format_block<'a>(&self, title: impl Into<Line<'a>>, panel: Panel) -> Block<'a> {
         let mut title: Line = title.into();
         let border_style = if self.selected_panel == panel {
@@ -633,7 +782,7 @@ impl App {
             .borrow()
             .selected()
             .and_then(|i| tree.visible_items.get(i))
-            .is_some_and(|item| item.is_tensor())
+            .is_some_and(|item| item.info.is_tensor())
     }
 
     fn render_analysis_panel(&mut self, f: &mut ratatui::Frame, area: Rect) {
