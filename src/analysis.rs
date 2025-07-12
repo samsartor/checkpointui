@@ -23,6 +23,12 @@ pub struct Analysis {
     pub error: OnceLock<Error>,
 }
 
+impl Drop for Analysis {
+    fn drop(&mut self) {
+        eprintln!("dropped analysis");
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BarChart {
     pub bins: Vec<usize>,
@@ -159,9 +165,11 @@ fn compute_histogram(
         Some(Req::Completed(_)) => bail!("already computed"),
     };
     let histogram = Histogram::new(data, bin_count, false, out.map(|_| &()))?;
-    out.get(&pin())
-        .ok_or(anyhow!("cancelled"))?
-        .set(Req::Completed(histogram));
+    {
+        out.get(&pin())
+            .ok_or(anyhow!("cancelled"))?
+            .set(Req::Completed(histogram));
+    }
     Ok(())
 }
 
@@ -198,11 +206,13 @@ fn compute_spectrum(
         .singular_values()
         .map_err(|err| anyhow!("could not perform SVD: {err:?}"))?;
     let histogram = Histogram::new(&values, bin_count, true, out.map(|_| &()))?;
-    out.get(&pin())
-        .ok_or(anyhow!("cancelled"))?
-        .set(Req::Completed(Spectrum {
-            chart: histogram.chart,
-        }));
+    {
+        out.get(&pin())
+            .ok_or(anyhow!("cancelled"))?
+            .set(Req::Completed(Spectrum {
+                chart: histogram.chart,
+            }));
+    }
     Ok(())
 }
 

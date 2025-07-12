@@ -23,11 +23,11 @@ use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use weakref::{Own, refer};
+use weakref::Own;
 
 use crate::analysis::{Analysis, AnalysisCell, Req, start_analysis_thread};
 use crate::gguf::Gguf;
-use crate::model::{Key, ModuleInfo, ModuleSource, PathSplit, TensorInfo, shorten_value};
+use crate::model::{Key, ModuleInfo, ModuleSource, PathSplit, shorten_value};
 use crate::safetensors::Safetensors;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -88,6 +88,8 @@ pub struct App {
     pub path_split: PathSplit,
     analysis_sender: Option<Own<Box<AnalysisCell>>>,
     current_analysis: Option<Own<Box<Analysis>>>,
+    histogram_size_limit: u64,
+    spectrum_size_limit: u64,
 }
 
 struct TreeState {
@@ -225,6 +227,10 @@ impl App {
         this.bytes_formatter
             .with_scales(Scales::Binary())
             .with_units("B");
+        // Set configurable size limits for analysis
+        // Lower limit for histogram as it's cheaper to compute
+        this.histogram_size_limit = 20 * 1024 * 1024; // 20Mi elements
+        this.spectrum_size_limit = 2 * 1024 * 1024; // 10Mi elements (SVD is more expensive)
         this
     }
 
@@ -305,6 +311,9 @@ impl App {
                     s.toggle_expanded();
                     s.rebuild_visible_items();
                     self.update_analysis_for_selected_tensor();
+                }
+                (KeyCode::Char('y'), _, _) => {
+                    self.handle_y_key();
                 }
 
                 // Analysis panel controls (currently read-only)
@@ -703,7 +712,7 @@ impl App {
             lines.push(Line::from(vec![
                 label.into(),
                 bar.fg(color),
-                format!(" ({})", count).into(),
+                format!(" ({count})").into(),
             ]));
         }
 
@@ -815,10 +824,27 @@ impl App {
         let Some(tensor_info) = &item.info.tensor_info else {
             return;
         };
+
+        // Calculate total number of elements in the tensor
+        let total_elements = tensor_info.shape.iter().copied().product::<u64>();
+
+        // Conditionally request analysis based on tensor size
+        let histogram_cell = if total_elements <= self.histogram_size_limit {
+            AsyncCell::new_with(Req::Requested)
+        } else {
+            AsyncCell::new()
+        };
+
+        let spectrum_cell = if total_elements <= self.spectrum_size_limit {
+            AsyncCell::new_with(Req::Requested)
+        } else {
+            AsyncCell::new()
+        };
+
         let analysis = Own::new(Box::new(Analysis {
             tensor: tensor_info.clone(),
-            histogram: AsyncCell::new_with(Req::Requested),
-            spectrum: AsyncCell::new_with(Req::Requested),
+            histogram: histogram_cell,
+            spectrum: spectrum_cell,
             error: std::sync::OnceLock::new(),
             max_bin_count: 20,
         }));
@@ -826,6 +852,22 @@ impl App {
             sender.set(analysis.refer());
         }
         self.current_analysis = Some(analysis);
+    }
+
+    fn handle_y_key(&mut self) {
+        let Some(analysis) = &self.current_analysis else {
+            return;
+        };
+
+        // Check if histogram is not set (not requested yet)
+        if !analysis.histogram.is_set() {
+            analysis.histogram.set(Req::Requested);
+        } else {
+            // If histogram is already requested, check spectrum
+            if !analysis.spectrum.is_set() {
+                analysis.spectrum.set(Req::Requested);
+            }
+        }
     }
 }
 
