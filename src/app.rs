@@ -229,8 +229,8 @@ impl App {
             .with_units("B");
         // Set configurable size limits for analysis
         // Lower limit for histogram as it's cheaper to compute
-        this.histogram_size_limit = 20 * 1024 * 1024; // 20Mi elements
-        this.spectrum_size_limit = 2 * 1024 * 1024; // 10Mi elements (SVD is more expensive)
+        this.histogram_size_limit = 100 * 1024 * 1024; // 100Mi elements
+        this.spectrum_size_limit = 2 * 1024 * 1024; // 2Mi elements (SVD is more expensive)
         this
     }
 
@@ -669,8 +669,8 @@ impl App {
         if tensor_info.shape.len() == 2 {
             self.render_spectrum(f, analysis_chunks[1]);
         } else {
-            let placeholder = Paragraph::new("Spectrum only available for 2D tensors")
-                .block(self.format_block("Spectrum (SVD)", Panel::Analysis))
+            let placeholder = Paragraph::new("SVD only possible on 2D tensors")
+                .block(self.format_block("Matrix Spectrum", Panel::Analysis))
                 .style(Style::default().fg(Color::Gray));
             f.render_widget(placeholder, analysis_chunks[1]);
         }
@@ -808,7 +808,7 @@ impl App {
         self.render_spectrum_into(&mut text);
 
         let svd_widget = Paragraph::new(text)
-            .block(self.format_block("Singular Values", Panel::Analysis))
+            .block(self.format_block("Matrix Spectrum", Panel::Analysis))
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false });
 
