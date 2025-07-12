@@ -6,7 +6,8 @@ edition = "2024"
 [dependencies]
 anyhow = { workspace = true }
 byteorder = "1.5.0"
- 
+serde_json = { workspace = true, optional = true }
+
 [build-dependencies]
 cmake = "0.1.54"
 bindgen = "0.71.0"

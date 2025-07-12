@@ -1,5 +1,6 @@
 mod analysis;
 mod app;
+mod gguf;
 mod model;
 mod safetensors;
 

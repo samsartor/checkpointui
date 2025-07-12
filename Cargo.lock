@@ -230,6 +230,7 @@ dependencies = [
  "faer",
  "float8",
  "futures-lite",
+ "ggml-base",
  "half",
  "human_format",
  "json5",
@@ -935,6 +936,7 @@ dependencies = [
  "bindgen",
  "byteorder",
  "cmake",
+ "serde_json",
 ]
 
 [[package]]

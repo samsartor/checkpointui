@@ -20,24 +20,24 @@ fn read_gguf_string<O: ByteOrder>(read: &mut impl Read) -> Result<String, Error>
 pub struct GgufFile {
     pub metadata: HashMap<String, GgufValue>,
     pub tensors: Vec<GgmlTensorInfo>,
-    pub data_start: usize,
+    pub data_start: u64,
 }
 
 struct Position<'a, R> {
     read: &'a mut R,
-    pos: usize,
+    pos: u64,
 }
 
 impl<R: Read> Read for Position<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let count = R::read(self.read, buf)?;
-        self.pos += count;
+        self.pos += count as u64;
         Ok(count)
     }
 
     fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
         R::read_exact(self.read, buf)?;
-        self.pos += buf.len();
+        self.pos += buf.len() as u64;
         Ok(())
     }
 }
@@ -68,7 +68,7 @@ impl GgufFile {
         }
 
         let alignment = match metadata.get("general.alignment") {
-            Some(GgufValue::Uint32(a)) => *a as usize,
+            Some(GgufValue::Uint32(a)) => *a as u64,
             _ => bail!("no general.alignment metadata"),
         };
         let padding = (alignment - read.pos % alignment) % alignment;
@@ -254,5 +254,49 @@ impl GgmlTensorInfo {
         let dequantize = self.traits_from_ggml().unwrap().to_float?;
         unsafe { dequantize(data.as_ptr() as _, floats.as_mut_ptr() as _, k as i64) };
         Some(floats)
+    }
+}
+
+#[cfg(feature = "serde_json")]
+impl From<GgufValue> for serde_json::Value {
+    fn from(value: GgufValue) -> Self {
+        use GgufValue::*;
+        match value {
+            Uint8(x) => x.into(),
+            Int8(x) => x.into(),
+            Uint16(x) => x.into(),
+            Int16(x) => x.into(),
+            Uint32(x) => x.into(),
+            Int32(x) => x.into(),
+            Float32(x) => x.into(),
+            Uint64(x) => x.into(),
+            Int64(x) => x.into(),
+            Float64(x) => serde_json::Number::from_f64(x).unwrap().into(),
+            Bool(x) => x.into(),
+            String(x) => x.into(),
+            GgufValue::Array(x) => x.into_iter().map(serde_json::Value::from).collect(),
+        }
+    }
+}
+
+#[cfg(feature = "serde_json")]
+impl From<&'_ GgufValue> for serde_json::Value {
+    fn from(value: &GgufValue) -> Self {
+        use GgufValue::*;
+        match *value {
+            Uint8(x) => x.into(),
+            Int8(x) => x.into(),
+            Uint16(x) => x.into(),
+            Int16(x) => x.into(),
+            Uint32(x) => x.into(),
+            Int32(x) => x.into(),
+            Float32(x) => x.into(),
+            Uint64(x) => x.into(),
+            Int64(x) => x.into(),
+            Float64(x) => serde_json::Number::from_f64(x).unwrap().into(),
+            Bool(x) => x.into(),
+            String(ref x) => x.clone().into(),
+            GgufValue::Array(ref x) => x.iter().map(serde_json::Value::from).collect(),
+        }
     }
 }
