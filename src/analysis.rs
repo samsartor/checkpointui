@@ -1,32 +1,27 @@
 use anyhow::{Error, anyhow, bail};
-use async_cell::sync::{AsyncCell, GetRef, TakeRef};
+use async_cell::sync::{AsyncCell, TakeRef};
 use futures_lite::future::block_on;
 use rand::seq::SliceRandom;
-use std::sync::OnceLock;
+use std::{
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering::Relaxed},
+    },
+    thread::sleep,
+    time::Duration,
+};
 use weakref::{Ref, pin};
 
 use crate::model::{ModuleSource, TensorInfo};
 
-#[derive(Debug, Clone)]
-pub enum Req<T> {
-    Requested,
-    Completed(T),
-}
-
-pub type ReqCell<T> = AsyncCell<Req<T>>;
-
 pub struct Analysis {
     pub tensor: TensorInfo,
     pub max_bin_count: usize,
-    pub histogram: ReqCell<Histogram>,
-    pub spectrum: ReqCell<Spectrum>,
+    pub histogram_go: AtomicBool,
+    pub histogram: OnceLock<Histogram>,
+    pub spectrum_go: AtomicBool,
+    pub spectrum: OnceLock<Spectrum>,
     pub error: OnceLock<Error>,
-}
-
-impl Drop for Analysis {
-    fn drop(&mut self) {
-        eprintln!("dropped analysis");
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -157,18 +152,20 @@ fn compute_histogram(
     _info: TensorInfo,
     data: &[f32],
     bin_count: usize,
-    out: Ref<ReqCell<Histogram>>,
+    go: Ref<AtomicBool>,
+    out: Ref<OnceLock<Histogram>>,
 ) -> Result<(), Error> {
-    match block_on(GetRef(out)) {
-        None => bail!("cancelled"),
-        Some(Req::Requested) => (),
-        Some(Req::Completed(_)) => bail!("already computed"),
-    };
+    loop {
+        match go.get(&pin()) {
+            Some(go) if go.load(Relaxed) => break,
+            Some(_) => sleep(Duration::from_millis(100)),
+            None => bail!("cancelled"),
+        }
+    }
+
     let histogram = Histogram::new(data, bin_count, false, out.map(|_| &()))?;
     {
-        out.get(&pin())
-            .ok_or(anyhow!("cancelled"))?
-            .set(Req::Completed(histogram));
+        let _ = out.get(&pin()).ok_or(anyhow!("cancelled"))?.set(histogram);
     }
     Ok(())
 }
@@ -177,20 +174,21 @@ fn compute_spectrum(
     info: TensorInfo,
     data: &[f32],
     bin_count: usize,
-    out: Ref<ReqCell<Spectrum>>,
+    go: Ref<AtomicBool>,
+    out: Ref<OnceLock<Spectrum>>,
 ) -> Result<(), Error> {
-    match block_on(GetRef(out)) {
-        None => bail!("cancelled"),
-        Some(Req::Requested) => (),
-        Some(Req::Completed(_)) => bail!("already computed"),
-    };
+    loop {
+        match go.get(&pin()) {
+            Some(go) if go.load(Relaxed) => break,
+            Some(_) => sleep(Duration::from_millis(100)),
+            None => bail!("cancelled"),
+        }
+    }
 
     if data.is_empty() {
-        out.get(&pin())
-            .ok_or(anyhow!("cancelled"))?
-            .set(Req::Completed(Spectrum {
-                chart: BarChart::default(),
-            }));
+        let _ = out.get(&pin()).ok_or(anyhow!("cancelled"))?.set(Spectrum {
+            chart: BarChart::default(),
+        });
         bail!("tensor is empty");
     }
 
@@ -207,33 +205,41 @@ fn compute_spectrum(
         .map_err(|err| anyhow!("could not perform SVD: {err:?}"))?;
     let histogram = Histogram::new(&values, bin_count, true, out.map(|_| &()))?;
     {
-        out.get(&pin())
-            .ok_or(anyhow!("cancelled"))?
-            .set(Req::Completed(Spectrum {
-                chart: histogram.chart,
-            }));
+        let _ = out.get(&pin()).ok_or(anyhow!("cancelled"))?.set(Spectrum {
+            chart: histogram.chart,
+        });
     }
     Ok(())
 }
 
 fn do_analysis(source: &mut dyn ModuleSource, request: Ref<Analysis>) -> Result<(), Error> {
-    let (tensor, max_bin_count, cancel, histogram, spectrum) = {
+    let tensor;
+    let max_bin_count;
+    let cancel;
+    let histogram;
+    let spectrum;
+    let spectrum_go;
+    let histogram_go;
+    {
         let guard = pin();
-        let cancel = request.map_with(|_| &(), &guard);
-        let histogram = request.map_with(|req| &req.histogram, &guard);
-        let spectrum = request.map_with(|req| &req.spectrum, &guard);
+        cancel = request.map_with(|_| &(), &guard);
+        histogram = request.map_with(|req| &req.histogram, &guard);
+        spectrum = request.map_with(|req| &req.spectrum, &guard);
+        histogram_go = request.map_with(|req| &req.histogram_go, &guard);
+        spectrum_go = request.map_with(|req| &req.spectrum_go, &guard);
         let request = request.get(&guard).ok_or(anyhow!("cancelled"))?;
-        (
-            request.tensor.clone(),
-            request.max_bin_count,
-            cancel,
-            histogram,
-            spectrum,
-        )
-    };
+        tensor = request.tensor.clone();
+        max_bin_count = request.max_bin_count;
+    }
     let data = source.tensor_f32(tensor.clone(), cancel)?;
-    compute_histogram(tensor.clone(), &data, max_bin_count, histogram)?;
-    compute_spectrum(tensor, &data, max_bin_count, spectrum)?;
+    compute_histogram(
+        tensor.clone(),
+        &data,
+        max_bin_count,
+        histogram_go,
+        histogram,
+    )?;
+    compute_spectrum(tensor, &data, max_bin_count, spectrum_go, spectrum)?;
     Ok(())
 }
 

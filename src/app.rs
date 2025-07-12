@@ -1,5 +1,4 @@
 use anyhow::{Error, bail};
-use async_cell::sync::AsyncCell;
 use human_format::{Formatter, Scales};
 use lexical_sort::natural_lexical_cmp;
 use owning_ref::ArcRef;
@@ -21,11 +20,12 @@ use std::collections::HashSet;
 use std::io::{Stdout, stdout};
 use std::mem;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::Ordering::Relaxed;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use weakref::Own;
 
-use crate::analysis::{Analysis, AnalysisCell, Req, start_analysis_thread};
+use crate::analysis::{Analysis, AnalysisCell, start_analysis_thread};
 use crate::gguf::Gguf;
 use crate::model::{Key, ModuleInfo, ModuleSource, PathSplit, shorten_value};
 use crate::safetensors::Safetensors;
@@ -730,8 +730,11 @@ impl App {
             return;
         }
 
-        match analysis.histogram.try_get() {
-            Some(Req::Completed(histogram)) => {
+        match (
+            analysis.histogram.get(),
+            analysis.histogram_go.load(Relaxed),
+        ) {
+            (Some(histogram), _) => {
                 text.push_line(vec![
                     "Data range: ".bold(),
                     format!("{:.3} to {:.3}", histogram.min, histogram.max).into(),
@@ -746,10 +749,10 @@ impl App {
                 );
                 text.extend(chart_lines);
             }
-            Some(Req::Requested) => {
+            (None, true) => {
                 text.push_line(vec!["🔄 Computing histogram...".fg(Color::Yellow)]);
             }
-            None => {
+            (None, false) => {
                 text.push_line(vec!["Press \"y\" to compute histogram".fg(Color::Red)]);
             }
         }
@@ -777,8 +780,8 @@ impl App {
             return;
         }
 
-        match analysis.spectrum.try_get() {
-            Some(Req::Completed(spectrum)) => {
+        match (analysis.spectrum.get(), analysis.spectrum_go.load(Relaxed)) {
+            (Some(spectrum), _) => {
                 text.push_line(Line::from(""));
 
                 let chart_lines = Self::render_bar_chart(
@@ -789,10 +792,10 @@ impl App {
                 );
                 text.extend(chart_lines);
             }
-            Some(Req::Requested) => {
+            (None, true) => {
                 text.push_line(vec!["🔄 Computing SVD decomposition...".fg(Color::Yellow)]);
             }
-            None => {
+            (None, false) => {
                 text.push_line(vec![
                     "Press \"y\" to compute SVD decomposition".fg(Color::Red),
                 ]);
@@ -828,23 +831,12 @@ impl App {
         // Calculate total number of elements in the tensor
         let total_elements = tensor_info.shape.iter().copied().product::<u64>();
 
-        // Conditionally request analysis based on tensor size
-        let histogram_cell = if total_elements <= self.histogram_size_limit {
-            AsyncCell::new_with(Req::Requested)
-        } else {
-            AsyncCell::new()
-        };
-
-        let spectrum_cell = if total_elements <= self.spectrum_size_limit {
-            AsyncCell::new_with(Req::Requested)
-        } else {
-            AsyncCell::new()
-        };
-
         let analysis = Own::new(Box::new(Analysis {
             tensor: tensor_info.clone(),
-            histogram: histogram_cell,
-            spectrum: spectrum_cell,
+            histogram: OnceLock::new(),
+            histogram_go: (total_elements <= self.histogram_size_limit).into(),
+            spectrum: OnceLock::new(),
+            spectrum_go: (total_elements <= self.spectrum_size_limit).into(),
             error: std::sync::OnceLock::new(),
             max_bin_count: 20,
         }));
@@ -860,12 +852,12 @@ impl App {
         };
 
         // Check if histogram is not set (not requested yet)
-        if !analysis.histogram.is_set() {
-            analysis.histogram.set(Req::Requested);
+        if !analysis.histogram_go.load(Relaxed) {
+            analysis.histogram_go.store(true, Relaxed);
         } else {
             // If histogram is already requested, check spectrum
-            if !analysis.spectrum.is_set() {
-                analysis.spectrum.set(Req::Requested);
+            if !analysis.spectrum_go.load(Relaxed) {
+                analysis.spectrum_go.store(true, Relaxed);
             }
         }
     }
