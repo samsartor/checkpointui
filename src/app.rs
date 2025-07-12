@@ -1,4 +1,5 @@
 use anyhow::{Error, bail};
+use async_cell::sync::AsyncCell;
 use human_format::{Formatter, Scales};
 use lexical_sort::natural_lexical_cmp;
 use owning_ref::ArcRef;
@@ -24,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use weakref::{Own, refer};
 
-use crate::analysis::{Analysis, AnalysisCell, start_analysis_thread};
+use crate::analysis::{Analysis, AnalysisCell, Req, start_analysis_thread};
 use crate::gguf::Gguf;
 use crate::model::{Key, ModuleInfo, ModuleSource, PathSplit, TensorInfo, shorten_value};
 use crate::safetensors::Safetensors;
@@ -654,13 +655,13 @@ impl App {
             ])
             .split(area);
 
-        self.render_histogram(f, analysis_chunks[0], &tensor_info);
+        self.render_histogram(f, analysis_chunks[0]);
 
         if tensor_info.shape.len() == 2 {
-            self.render_singular_values(f, analysis_chunks[1], &tensor_info);
+            self.render_spectrum(f, analysis_chunks[1]);
         } else {
-            let placeholder = Paragraph::new("Singular values only available for 2D tensors")
-                .block(self.format_block("Singular Values", Panel::Analysis))
+            let placeholder = Paragraph::new("Spectrum only available for 2D tensors")
+                .block(self.format_block("Spectrum (SVD)", Panel::Analysis))
                 .style(Style::default().fg(Color::Gray));
             f.render_widget(placeholder, analysis_chunks[1]);
         }
@@ -709,38 +710,45 @@ impl App {
         lines
     }
 
-    fn render_histogram(&mut self, f: &mut ratatui::Frame, area: Rect, _tensor_info: &TensorInfo) {
-        let mut text = Text::default();
+    fn render_histogram_into(&mut self, text: &mut Text) {
+        let Some(analysis) = self.current_analysis.as_ref() else {
+            text.push_line("No analysis running");
+            return;
+        };
 
-        if let Some(analysis) = &self.current_analysis {
-            let analysis_ref = refer!(analysis);
-            if let Some(analysis_data) = analysis_ref.get(&weakref::pin()) {
-                if let Some(histogram) = analysis_data.histogram.get() {
-                    text.push_line(vec![
-                        "Data range: ".bold(),
-                        format!("{:.3} to {:.3}", histogram.min, histogram.max).into(),
-                    ]);
-                    text.push_line(Line::from(""));
-
-                    let chart_lines = Self::render_bar_chart(
-                        &histogram.chart,
-                        30, // max_width
-                        Color::Blue,
-                        |x| format!("{x:6.2}"),
-                    );
-                    text.extend(chart_lines);
-                } else if let Some(error) = analysis_data.error.get() {
-                    text.push_line(vec!["Error: ".fg(Color::Red), format!("{error}").into()]);
-                } else {
-                    text.push_line(vec!["🔄 Computing histogram...".fg(Color::Yellow)]);
-                }
-            } else {
-                text.push_line(vec!["Analysis cancelled".fg(Color::Gray)]);
-            }
-        } else {
-            text.push_line(Line::from("No analysis available"));
+        if let Some(error) = analysis.error.get() {
+            text.push_line(vec!["Error: ".fg(Color::Red), format!("{error}").into()]);
+            return;
         }
 
+        match analysis.histogram.try_get() {
+            Some(Req::Completed(histogram)) => {
+                text.push_line(vec![
+                    "Data range: ".bold(),
+                    format!("{:.3} to {:.3}", histogram.min, histogram.max).into(),
+                ]);
+                text.push_line(Line::from(""));
+
+                let chart_lines = Self::render_bar_chart(
+                    &histogram.chart,
+                    30, // max_width
+                    Color::Blue,
+                    |x| format!("{x:6.2}"),
+                );
+                text.extend(chart_lines);
+            }
+            Some(Req::Requested) => {
+                text.push_line(vec!["🔄 Computing histogram...".fg(Color::Yellow)]);
+            }
+            None => {
+                text.push_line(vec!["Press \"y\" to compute histogram".fg(Color::Red)]);
+            }
+        }
+    }
+
+    fn render_histogram(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        let mut text = Text::default();
+        self.render_histogram_into(&mut text);
         let histogram_widget = Paragraph::new(text)
             .block(self.format_block("Histogram", Panel::Analysis))
             .style(Style::default().fg(Color::White))
@@ -749,38 +757,43 @@ impl App {
         f.render_widget(histogram_widget, area);
     }
 
-    fn render_singular_values(
-        &mut self,
-        f: &mut ratatui::Frame,
-        area: Rect,
-        _tensor_info: &TensorInfo,
-    ) {
-        let mut text = Text::default();
+    fn render_spectrum_into(&mut self, text: &mut Text) {
+        let Some(analysis) = self.current_analysis.as_ref() else {
+            text.push_line("No analysis running");
+            return;
+        };
 
-        if let Some(analysis) = &self.current_analysis {
-            let analysis_ref = refer!(analysis);
-            if let Some(analysis_data) = analysis_ref.get(&weakref::pin()) {
-                if let Some(spectrum) = analysis_data.spectrum.get() {
-                    text.push_line(Line::from(""));
-
-                    let chart_lines = Self::render_bar_chart(
-                        &spectrum.chart,
-                        30, // max_width
-                        Color::Blue,
-                        |x| format!("{x:6.2}"),
-                    );
-                    text.extend(chart_lines);
-                } else if let Some(error) = analysis_data.error.get() {
-                    text.push_line(vec!["Error: ".fg(Color::Red), format!("{error}").into()]);
-                } else {
-                    text.push_line(vec!["🔄 Computing singular values...".fg(Color::Yellow)]);
-                }
-            } else {
-                text.push_line(vec!["Analysis cancelled".fg(Color::Gray)]);
-            }
-        } else {
-            text.push_line(Line::from("No analysis available"));
+        if let Some(error) = analysis.error.get() {
+            text.push_line(vec!["Error: ".fg(Color::Red), format!("{error}").into()]);
+            return;
         }
+
+        match analysis.spectrum.try_get() {
+            Some(Req::Completed(spectrum)) => {
+                text.push_line(Line::from(""));
+
+                let chart_lines = Self::render_bar_chart(
+                    &spectrum.chart,
+                    30, // max_width
+                    Color::Blue,
+                    |x| format!("{x:6.2}"),
+                );
+                text.extend(chart_lines);
+            }
+            Some(Req::Requested) => {
+                text.push_line(vec!["🔄 Computing SVD decomposition...".fg(Color::Yellow)]);
+            }
+            None => {
+                text.push_line(vec![
+                    "Press \"y\" to compute SVD decomposition".fg(Color::Red),
+                ]);
+            }
+        }
+    }
+
+    fn render_spectrum(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        let mut text = Text::default();
+        self.render_spectrum_into(&mut text);
 
         let svd_widget = Paragraph::new(text)
             .block(self.format_block("Singular Values", Panel::Analysis))
@@ -804,8 +817,8 @@ impl App {
         };
         let analysis = Own::new(Box::new(Analysis {
             tensor: tensor_info.clone(),
-            histogram: std::sync::OnceLock::new(),
-            spectrum: std::sync::OnceLock::new(),
+            histogram: AsyncCell::new_with(Req::Requested),
+            spectrum: AsyncCell::new_with(Req::Requested),
             error: std::sync::OnceLock::new(),
             max_bin_count: 20,
         }));

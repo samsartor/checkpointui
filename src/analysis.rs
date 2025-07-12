@@ -1,5 +1,5 @@
 use anyhow::{Error, anyhow, bail};
-use async_cell::sync::{AsyncCell, TakeRef};
+use async_cell::sync::{AsyncCell, GetRef, TakeRef};
 use futures_lite::future::block_on;
 use rand::seq::SliceRandom;
 use std::sync::OnceLock;
@@ -7,14 +7,23 @@ use weakref::{Ref, pin};
 
 use crate::model::{ModuleSource, TensorInfo};
 
+#[derive(Debug, Clone)]
+pub enum Req<T> {
+    Requested,
+    Completed(T),
+}
+
+pub type ReqCell<T> = AsyncCell<Req<T>>;
+
 pub struct Analysis {
     pub tensor: TensorInfo,
     pub max_bin_count: usize,
-    pub histogram: OnceLock<Histogram>,
-    pub spectrum: OnceLock<Spectrum>,
+    pub histogram: ReqCell<Histogram>,
+    pub spectrum: ReqCell<Spectrum>,
     pub error: OnceLock<Error>,
 }
 
+#[derive(Debug, Clone)]
 pub struct BarChart {
     pub bins: Vec<usize>,
     pub left: f32,
@@ -37,7 +46,7 @@ impl Default for BarChart {
 
 const QUARTILE_SAMPLES: usize = 200;
 
-#[derive(Default)]
+#[derive(Default, Debug, Clone)]
 pub struct Histogram {
     pub min: f32,
     pub max: f32,
@@ -133,6 +142,7 @@ impl Histogram {
     }
 }
 
+#[derive(Default, Debug, Clone)]
 pub struct Spectrum {
     pub chart: BarChart,
 }
@@ -141,18 +151,17 @@ fn compute_histogram(
     _info: TensorInfo,
     data: &[f32],
     bin_count: usize,
-    out: Ref<OnceLock<Histogram>>,
+    out: Ref<ReqCell<Histogram>>,
 ) -> Result<(), Error> {
-    let guard = pin();
-    let _ = out
-        .get(&guard)
+    match block_on(GetRef(out)) {
+        None => bail!("cancelled"),
+        Some(Req::Requested) => (),
+        Some(Req::Completed(_)) => bail!("already computed"),
+    };
+    let histogram = Histogram::new(data, bin_count, false, out.map(|_| &()))?;
+    out.get(&pin())
         .ok_or(anyhow!("cancelled"))?
-        .set(Histogram::new(
-            data,
-            bin_count,
-            false,
-            out.map_with(|_| &(), &guard),
-        )?);
+        .set(Req::Completed(histogram));
     Ok(())
 }
 
@@ -160,16 +169,21 @@ fn compute_spectrum(
     info: TensorInfo,
     data: &[f32],
     bin_count: usize,
-    out: Ref<OnceLock<Spectrum>>,
+    out: Ref<ReqCell<Spectrum>>,
 ) -> Result<(), Error> {
+    match block_on(GetRef(out)) {
+        None => bail!("cancelled"),
+        Some(Req::Requested) => (),
+        Some(Req::Completed(_)) => bail!("already computed"),
+    };
+
     if data.is_empty() {
-        let _ = out.get(&pin()).ok_or(anyhow!("cancelled"))?.set(Spectrum {
-            chart: BarChart::default(),
-        });
+        out.get(&pin())
+            .ok_or(anyhow!("cancelled"))?
+            .set(Req::Completed(Spectrum {
+                chart: BarChart::default(),
+            }));
         bail!("tensor is empty");
-    }
-    if !out.is_alive() {
-        bail!("canceled");
     }
 
     let &[h, w] = info.shape.as_slice() else {
@@ -183,10 +197,12 @@ fn compute_spectrum(
     let values = matrix
         .singular_values()
         .map_err(|err| anyhow!("could not perform SVD: {err:?}"))?;
-    let guard = pin();
-    let _ = out.get(&guard).ok_or(anyhow!("cancelled"))?.set(Spectrum {
-        chart: Histogram::new(&values, bin_count, true, out.map_with(|_| &(), &guard))?.chart,
-    });
+    let histogram = Histogram::new(&values, bin_count, true, out.map(|_| &()))?;
+    out.get(&pin())
+        .ok_or(anyhow!("cancelled"))?
+        .set(Req::Completed(Spectrum {
+            chart: histogram.chart,
+        }));
     Ok(())
 }
 
