@@ -12,6 +12,11 @@ pub fn main() {
 
     println!("cargo:rustc-link-search=native={}", lib_path.display());
     println!("cargo:rustc-link-lib=static=ggml-base");
+    if cfg!(target_os = "macos") {
+        println!("cargo:rustc-link-lib=c++");
+    } else {
+        println!("cargo:rustc-link-lib=stdc++");
+    }
 
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")

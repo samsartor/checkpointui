@@ -32,7 +32,7 @@ use crate::safetensors::Safetensors;
 
 pub trait TreeData: Send + Sync {
     fn has_children(&self) -> bool;
-    fn children(this: ArcRef<Self>) -> Box<dyn Iterator<Item=(String, ArcRef<Self>)>>;
+    fn children(this: ArcRef<Self>) -> Box<dyn Iterator<Item = (String, ArcRef<Self>)>>;
 }
 
 impl TreeData for ModuleInfo {
@@ -40,7 +40,7 @@ impl TreeData for ModuleInfo {
         !self.children.is_empty()
     }
 
-    fn children(this: ArcRef<Self>) -> Box<dyn Iterator<Item=(String, ArcRef<Self>)>> {
+    fn children(this: ArcRef<Self>) -> Box<dyn Iterator<Item = (String, ArcRef<Self>)>> {
         let keys: Vec<_> = this.children.keys().cloned().collect();
         Box::new(keys.into_iter().map(move |key| {
             let child = this.clone().map(|m| &m.children[&key]);
@@ -64,36 +64,35 @@ impl TreeData for Value {
         }
     }
 
-    fn children(this: ArcRef<Self>) -> Box<dyn Iterator<Item=(String, ArcRef<Self>)>> {
+    fn children(this: ArcRef<Self>) -> Box<dyn Iterator<Item = (String, ArcRef<Self>)>> {
         match &*this {
             Value::Object(map) => {
                 let keys: Vec<_> = map.keys().cloned().collect();
-                let iter: Box<dyn Iterator<Item=(String, ArcRef<Self>)>> = Box::new(
-                    keys.into_iter().map(move |key| {
+                let iter: Box<dyn Iterator<Item = (String, ArcRef<Self>)>> =
+                    Box::new(keys.into_iter().map(move |key| {
                         let child = this.clone().map(|v| match v {
                             Value::Object(map) => &map[&key],
                             _ => unreachable!(),
                         });
                         (key, child)
-                    })
-                );
+                    }));
                 iter
             }
             Value::Array(arr) => {
                 let len = arr.len();
-                let iter: Box<dyn Iterator<Item=(String, ArcRef<Self>)>> = Box::new(
-                    (0..len).map(move |i| {
+                let iter: Box<dyn Iterator<Item = (String, ArcRef<Self>)>> =
+                    Box::new((0..len).map(move |i| {
                         let child = this.clone().map(|v| match v {
                             Value::Array(arr) => &arr[i],
                             _ => unreachable!(),
                         });
                         (format!("[{}]", i), child)
-                    })
-                );
+                    }));
                 iter
             }
             _ => {
-                let iter: Box<dyn Iterator<Item=(String, ArcRef<Self>)>> = Box::new(std::iter::empty());
+                let iter: Box<dyn Iterator<Item = (String, ArcRef<Self>)>> =
+                    Box::new(std::iter::empty());
                 iter
             }
         }
@@ -200,7 +199,11 @@ impl<T: TreeData> TreeState<T> {
         self.visible_items.clear();
         let mut stack = vec![(self.data.clone(), "".to_string(), -1)];
         while let Some((info, name, depth)) = stack.pop() {
-            let full_name = if depth < 0 { String::new() } else { name.clone() };
+            let full_name = if depth < 0 {
+                String::new()
+            } else {
+                name.clone()
+            };
             let is_expanded = depth < 0 || self.expanded.contains(&full_name);
             if is_expanded {
                 let stack_at = stack.len();
@@ -647,7 +650,9 @@ impl App {
     }
 
     fn render_file_meta_tree_panel(&mut self, f: &mut ratatui::Frame, area: Rect) {
-        let Some(module_tree) = &self.tree_state else { return };
+        let Some(module_tree) = &self.tree_state else {
+            return;
+        };
 
         // Split the area into file info and metadata tree
         let chunks = Layout::default()
@@ -675,7 +680,8 @@ impl App {
         ]);
         file_info.push_line(vec![
             "Total Parameters: ".bold(),
-            self.format_count(module_tree.data.total_params).fg(COUNT_FG),
+            self.format_count(module_tree.data.total_params)
+                .fg(COUNT_FG),
         ]);
 
         let file_info_widget = Paragraph::new(file_info)
@@ -729,7 +735,11 @@ impl App {
                 .block(self.format_block("Metadata", Panel::FileInfo))
                 .style(Style::default().fg(Color::White))
                 .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
-            list.render(chunks[1], f.buffer_mut(), &mut *tree.list_state.borrow_mut());
+            list.render(
+                chunks[1],
+                f.buffer_mut(),
+                &mut *tree.list_state.borrow_mut(),
+            );
         } else {
             let no_metadata = Paragraph::new("No metadata available")
                 .block(self.format_block("Metadata", Panel::FileInfo))
