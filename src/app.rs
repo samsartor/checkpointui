@@ -17,6 +17,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::hash::Hash;
 use std::io::{Stdout, stdout};
 use std::mem;
 use std::path::PathBuf;
@@ -27,15 +28,20 @@ use weakref::Own;
 
 use crate::analysis::{Analysis, AnalysisCell, start_analysis_thread};
 use crate::gguf::Gguf;
-use crate::model::{ModuleInfo, ModuleSource, PathSplit, shorten_value};
+use crate::model::{Key, ModuleInfo, ModuleSource, PathSplit, shorten_value};
 use crate::safetensors::Safetensors;
 
 pub trait TreeData: Send + Sync {
+    type Id: Ord + Hash + Clone;
+
     fn has_children(&self) -> bool;
     fn children(this: ArcRef<Self>) -> Box<dyn Iterator<Item = (String, ArcRef<Self>)>>;
+    fn unique_id(&self) -> Self::Id;
 }
 
 impl TreeData for ModuleInfo {
+    type Id = Key;
+
     fn has_children(&self) -> bool {
         !self.children.is_empty()
     }
@@ -47,6 +53,10 @@ impl TreeData for ModuleInfo {
             (key.to_string(), child)
         }))
     }
+
+    fn unique_id(&self) -> Self::Id {
+        self.full_name.clone()
+    }
 }
 
 impl ModuleInfo {
@@ -56,6 +66,8 @@ impl ModuleInfo {
 }
 
 impl TreeData for Value {
+    type Id = *const Value;
+
     fn has_children(&self) -> bool {
         match self {
             Value::Object(map) => !map.is_empty(),
@@ -86,7 +98,7 @@ impl TreeData for Value {
                             Value::Array(arr) => &arr[i],
                             _ => unreachable!(),
                         });
-                        (format!("[{}]", i), child)
+                        (format!("[{i}]"), child)
                     }));
                 iter
             }
@@ -96,6 +108,11 @@ impl TreeData for Value {
                 iter
             }
         }
+    }
+
+    fn unique_id(&self) -> Self::Id {
+        // Use the pointer address as a unique identifier for Value items
+        self as *const Value
     }
 }
 
@@ -165,7 +182,7 @@ pub struct App {
 struct TreeState<T: TreeData> {
     data: ArcRef<T>,
     data_history: Vec<ArcRef<T>>,
-    expanded: HashSet<String>,
+    expanded: HashSet<T::Id>,
     visible_items: Vec<TreeItem<T>>,
     list_state: RefCell<ListState>,
 }
@@ -199,12 +216,8 @@ impl<T: TreeData> TreeState<T> {
         self.visible_items.clear();
         let mut stack = vec![(self.data.clone(), "".to_string(), -1)];
         while let Some((info, name, depth)) = stack.pop() {
-            let full_name = if depth < 0 {
-                String::new()
-            } else {
-                name.clone()
-            };
-            let is_expanded = depth < 0 || self.expanded.contains(&full_name);
+            // Use the unique_id method to get a proper identifier for each item
+            let is_expanded = depth < 0 || self.expanded.contains(&info.unique_id());
             if is_expanded {
                 let stack_at = stack.len();
                 for (key, child) in T::children(info.clone()) {
@@ -236,10 +249,11 @@ impl<T: TreeData> TreeState<T> {
         if !item.has_children() {
             return;
         }
-        if self.expanded.contains(&item.name) {
-            self.expanded.remove(&item.name);
+        let id = item.info.unique_id();
+        if self.expanded.contains(&id) {
+            self.expanded.remove(&id);
         } else {
-            self.expanded.insert(item.name.clone());
+            self.expanded.insert(id);
         }
     }
 
@@ -584,7 +598,11 @@ impl App {
             })
             .collect();
 
-        let title: Line = "Module Tree".into();
+        let mut title: Line = "Module Tree".into();
+        if !tree.data.full_name.is_empty() {
+            title += " - ".into();
+            title += tree.data.full_name.fg(MODULE_FG);
+        }
 
         let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
 
