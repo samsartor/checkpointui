@@ -4,7 +4,7 @@ use futures_lite::future::block_on;
 use rand::seq::SliceRandom;
 use std::{
     sync::{
-        OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering::Relaxed},
     },
     thread::sleep,
@@ -212,7 +212,7 @@ fn compute_spectrum(
     Ok(())
 }
 
-fn do_analysis(source: &mut dyn ModuleSource, request: Ref<Analysis>) -> Result<(), Error> {
+fn do_analysis(source: &Mutex<dyn ModuleSource>, request: Ref<Analysis>) -> Result<(), Error> {
     let tensor;
     let max_bin_count;
     let cancel;
@@ -231,7 +231,10 @@ fn do_analysis(source: &mut dyn ModuleSource, request: Ref<Analysis>) -> Result<
         tensor = request.tensor.clone();
         max_bin_count = request.max_bin_count;
     }
-    let data = source.tensor_f32(tensor.clone(), cancel)?;
+    let data = {
+        let mut source = source.lock().unwrap();
+        source.tensor_f32(tensor.clone(), cancel)?
+    };
     compute_histogram(
         tensor.clone(),
         &data,
@@ -245,12 +248,12 @@ fn do_analysis(source: &mut dyn ModuleSource, request: Ref<Analysis>) -> Result<
 
 pub type AnalysisCell = AsyncCell<Ref<Analysis>>;
 
-pub fn run_analysis_loop(mut source: Box<dyn ModuleSource>, requests: Ref<AnalysisCell>) {
+pub fn run_analysis_loop(mut source: Arc<Mutex<dyn ModuleSource>>, requests: Ref<AnalysisCell>) {
     loop {
         let Some(request) = block_on(TakeRef(requests)) else {
             return;
         };
-        match do_analysis(&mut *source, request) {
+        match do_analysis(&*source, request) {
             Ok(_) => (),
             Err(err) => {
                 request.inspect(|r| {
@@ -261,7 +264,7 @@ pub fn run_analysis_loop(mut source: Box<dyn ModuleSource>, requests: Ref<Analys
     }
 }
 
-pub fn start_analysis_thread(source: Box<dyn ModuleSource + Send>, cell: Ref<AnalysisCell>) {
+pub fn start_analysis_thread(source: Arc<Mutex<dyn ModuleSource + Send>>, cell: Ref<AnalysisCell>) {
     std::thread::spawn(move || {
         run_analysis_loop(source, cell);
     });

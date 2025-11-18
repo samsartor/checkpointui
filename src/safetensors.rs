@@ -58,12 +58,22 @@ fn flatten_value(path: String, value: &Value, map: &mut HashMap<String, String>)
         }
         Value::Array(array) => {
             for (k, v) in array.iter().enumerate() {
-                flatten_value(format!("{path}.{k}"), v, map);
+                let k = if path.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{path}.{k}")
+                };
+                flatten_value(k, v, map);
             }
         }
         Value::Object(object) => {
             for (k, v) in object.iter() {
-                flatten_value(format!("{path}.{k}"), v, map);
+                let k = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
+                flatten_value(k, v, map);
             }
         }
     }

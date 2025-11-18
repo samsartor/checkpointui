@@ -11,7 +11,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{
-    Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Wrap,
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, StatefulWidget, Wrap,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use serde_json::Value;
@@ -22,7 +22,7 @@ use std::io::{Stdout, stdout};
 use std::mem;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use weakref::Own;
 
@@ -126,6 +126,12 @@ enum Panel {
     Analysis,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DialogType {
+    Edit,
+    Delete,
+}
+
 impl Panel {
     fn next(self, analysis: bool) -> Self {
         match self {
@@ -166,7 +172,7 @@ pub struct App {
     file_path: Option<PathBuf>,
     tree_state: Option<TreeState<ModuleInfo>>,
     meta_tree_state: Option<TreeState<Value>>,
-    source: Option<Box<dyn ModuleSource + Send>>,
+    source: Option<Arc<Mutex<dyn ModuleSource + Send>>>,
     count_formatter: Formatter,
     bytes_formatter: Formatter,
     selected_panel: Panel,
@@ -176,6 +182,8 @@ pub struct App {
     current_analysis: Option<Own<Box<Analysis>>>,
     histogram_size_limit: u64,
     spectrum_size_limit: u64,
+    dialog_type: Option<DialogType>,
+    edit_draft: String,
 }
 
 struct TreeState<T: TreeData> {
@@ -318,9 +326,9 @@ impl App {
         let ext = file_path.extension().and_then(|ext| ext.to_str());
         let storage = FileStorage::new(file_path.clone());
         if ext == Some("safetensors") {
-            self.source = Some(Box::new(Safetensors::open(storage)?));
+            self.source = Some(Arc::new(Mutex::new(Safetensors::open(storage)?)));
         } else if ext == Some("gguf") {
-            self.source = Some(Box::new(Gguf::open(storage)?));
+            self.source = Some(Arc::new(Mutex::new(Gguf::open(storage)?)));
         } else {
             bail!("could not infer file type");
         }
@@ -329,28 +337,32 @@ impl App {
     }
 
     pub fn rebuild_module(&mut self) -> Result<(), Error> {
-        let Some(data) = &mut self.source else {
+        let Some(source) = &self.source else {
             return Ok(());
         };
-        let mut module = data.module(&self.path_split)?;
-        module.flatten_single_children();
-        let mut state = TreeState::new(Arc::new(module).into());
-        state.rebuild_visible_items();
-        self.tree_state = Some(state);
 
-        // Create metadata tree state
-        let extra_metadata = data.metadata()?;
-        let mut meta_state = TreeState::new(Arc::new(extra_metadata).into());
-        meta_state.rebuild_visible_items();
-        self.meta_tree_state = Some(meta_state);
+        {
+            // Create module tree state
+            let mut data = source.lock().unwrap();
+            let mut module = data.module(&self.path_split)?;
+            module.flatten_single_children();
+            let mut state = TreeState::new(Arc::new(module).into());
+            state.rebuild_visible_items();
+            self.tree_state = Some(state);
+
+            // Create metadata tree state
+            let extra_metadata = data.metadata()?;
+            let mut meta_state = TreeState::new(Arc::new(extra_metadata).into());
+            meta_state.rebuild_visible_items();
+            self.meta_tree_state = Some(meta_state);
+        }
 
         // Now that we have the tree, move the source to the analysis thread
-        let source = self.source.take().unwrap();
         let sender = self
             .analysis_sender
             .insert(Own::new_box(AnalysisCell::new()))
             .refer();
-        start_analysis_thread(source, sender);
+        start_analysis_thread(source.clone(), sender);
 
         // Start analysis for the initially selected tensor
         self.update_analysis_for_selected_tensor();
@@ -359,6 +371,45 @@ impl App {
 
     pub fn handle_events(&mut self) -> Result<(), Error> {
         if let Event::Key(key) = event::read()? {
+            // Handle dialog events first
+            if let Some(dialog_type) = &self.dialog_type {
+                match key.code {
+                    KeyCode::Esc => {
+                        // Cancel dialog
+                        self.dialog_type = None;
+                        self.edit_draft.clear();
+                    }
+                    KeyCode::Enter => {
+                        // Confirm action
+                        match dialog_type {
+                            DialogType::Edit => {
+                                // Parse the edit_draft and update metadata
+                                let new_value = self.parse_edit_draft();
+                                self.update_selected_metadata(Some(new_value));
+                                self.dialog_type = None;
+                                self.edit_draft.clear();
+                            }
+                            DialogType::Delete => {
+                                // Delete the metadata
+                                self.update_selected_metadata(None);
+                                self.dialog_type = None;
+                                self.edit_draft.clear();
+                            }
+                        }
+                    }
+                    KeyCode::Char(c) if matches!(dialog_type, DialogType::Edit) => {
+                        // Add character to edit draft
+                        self.edit_draft.push(c);
+                    }
+                    KeyCode::Backspace if matches!(dialog_type, DialogType::Edit) => {
+                        // Remove last character from edit draft
+                        self.edit_draft.pop();
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
+
             match (key.code, self.selected_panel, &mut self.tree_state) {
                 (KeyCode::Char('q') | KeyCode::Esc, _, _) => self.should_quit = true,
                 (KeyCode::Tab, _, _) => {
@@ -420,6 +471,19 @@ impl App {
                     if let Some(s) = &mut self.meta_tree_state {
                         s.toggle_expanded();
                         s.rebuild_visible_items();
+                    }
+                }
+                (KeyCode::Char('e'), Panel::FileInfo, _) => {
+                    // Open edit dialog for selected metadata item
+                    if let Some(value_str) = self.get_selected_metadata_value_string() {
+                        self.edit_draft = value_str;
+                        self.dialog_type = Some(DialogType::Edit);
+                    }
+                }
+                (KeyCode::Char('d'), Panel::FileInfo, _) => {
+                    // Open delete dialog for selected metadata item
+                    if self.is_metadata_item_selected() {
+                        self.dialog_type = Some(DialogType::Delete);
                     }
                 }
 
@@ -525,7 +589,11 @@ impl App {
 
         // Bottom bar
         let help_text = if self.tree_state.is_some() {
-            "↑/↓: Navigate | ←/→: Enter/Exit Module | Space/Enter: Expand/Collapse | Tab/Shift+Tab: Switch Panel | q/Esc: Quit"
+            if self.selected_panel == Panel::FileInfo && self.is_metadata_item_selected() {
+                "↑/↓: Navigate | ←/→: Enter/Exit | Space: Expand/Collapse | e: Edit | d: Delete | Tab: Switch Panel | q: Quit"
+            } else {
+                "↑/↓: Navigate | ←/→: Enter/Exit Module | Space/Enter: Expand/Collapse | Tab/Shift+Tab: Switch Panel | q/Esc: Quit"
+            }
         } else {
             "q/Esc: Quit"
         };
@@ -534,6 +602,11 @@ impl App {
             .block(Block::default().borders(Borders::ALL))
             .style(Style::default().fg(Color::Gray));
         f.render_widget(bottom_bar, chunks[2]);
+
+        // Render dialog overlay if open
+        if self.dialog_type.is_some() {
+            self.render_dialog(f, f.area());
+        }
     }
 
     fn render_tree_panel(&mut self, f: &mut ratatui::Frame, area: Rect) {
@@ -1043,7 +1116,7 @@ impl App {
     }
 
     fn update_selected_metadata(&mut self, new_value: Option<Value>) {
-        let Some(source) = &mut self.source else {
+        let Some(source) = &self.source else {
             return;
         };
         let Some(state) = &mut self.meta_tree_state else {
@@ -1058,11 +1131,13 @@ impl App {
         let root = &*state.data;
         let replace = &*item.info;
         let new_meta = clone_with_replacement(root, replace, new_value.as_ref()).unwrap();
-        match source
+
+        let mut data = source.lock().unwrap();
+        match data
             .write_metadata(&new_meta)
-            .and_then(|_| source.metadata())
+            .and_then(|_| data.metadata())
         {
-            Err(err) => {
+            Err(_err) => {
                 // TODO: display error
             }
             Ok(reloaded_meta) => {
@@ -1070,6 +1145,119 @@ impl App {
                 state.rebuild_visible_items();
             }
         }
+    }
+
+    fn get_selected_metadata_value_string(&self) -> Option<String> {
+        let state = self.meta_tree_state.as_ref()?;
+        let index = state.list_state.borrow().selected()?;
+        let item = state.visible_items.get(index)?;
+
+        // Convert value to a string that can be edited
+        match &*item.info {
+            Value::Null => Some("null".to_string()),
+            Value::Bool(b) => Some(b.to_string()),
+            Value::Number(n) => Some(n.to_string()),
+            Value::String(s) => Some(s.clone()),
+            Value::Array(_) | Value::Object(_) => None, // Can't edit complex types
+        }
+    }
+
+    fn is_metadata_item_selected(&self) -> bool {
+        let Some(state) = self.meta_tree_state.as_ref() else {
+            return false;
+        };
+        state.list_state.borrow().selected().is_some()
+    }
+
+    fn parse_edit_draft(&self) -> Value {
+        let draft = self.edit_draft.trim();
+
+        // Keep as a string
+        let force_string = (|| {
+            let state = self.meta_tree_state.as_ref()?;
+            let index = state.list_state.borrow().selected()?;
+            let item = state.visible_items.get(index)?;
+            Some(matches!(&*item.info, Value::String(_)))
+        })();
+        if force_string == Some(true) {
+            return Value::String(draft.to_string());
+        }
+
+        // Try to parse as different types
+        if draft == "null" {
+            Value::Null
+        } else if draft == "true" {
+            Value::Bool(true)
+        } else if draft == "false" {
+            Value::Bool(false)
+        } else if let Ok(num) = draft.parse::<i64>() {
+            Value::Number(num.into())
+        } else if let Some(num) = draft
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+        {
+            Value::Number(num)
+        } else {
+            // Treat as string
+            Value::String(draft.to_string())
+        }
+    }
+
+    fn render_dialog(&self, f: &mut ratatui::Frame, area: Rect) {
+        let Some(dialog_type) = &self.dialog_type else {
+            return;
+        };
+
+        // Create a centered dialog
+        let dialog_width = 60;
+        let dialog_height = 7;
+        let x = (area.width.saturating_sub(dialog_width)) / 2;
+        let y = (area.height.saturating_sub(dialog_height)) / 2;
+
+        let dialog_area = Rect {
+            x: area.x + x,
+            y: area.y + y,
+            width: dialog_width.min(area.width),
+            height: dialog_height.min(area.height),
+        };
+
+        // Clear the dialog area with a semi-transparent effect (using a filled block)
+        f.render_widget(Clear, dialog_area);
+
+        // Create dialog content
+        let mut text = Text::default();
+        match dialog_type {
+            DialogType::Edit => {
+                text.push_line("Edit Value".bold().fg(Color::Yellow));
+                text.push_line("");
+                text.push_line(vec![
+                    "Value: ".bold(),
+                    self.edit_draft.clone().fg(Color::White),
+                ]);
+                text.push_line("");
+                text.push_line("Enter: Confirm | Esc: Cancel".fg(Color::Gray));
+            }
+            DialogType::Delete => {
+                text.push_line("Delete Value".bold().fg(Color::Red));
+                text.push_line("");
+                text.push_line("Are you sure you want to delete this value?".fg(Color::White));
+                text.push_line("");
+                text.push_line("Enter: Confirm | Esc: Cancel".fg(Color::Gray));
+            }
+        }
+
+        let dialog = Paragraph::new(text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title("Metadata Editor"),
+            )
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false });
+
+        f.render_widget(dialog, dialog_area);
     }
 }
 
