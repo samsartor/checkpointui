@@ -3,6 +3,7 @@ mod app;
 mod gguf;
 mod model;
 mod safetensors;
+mod storage;
 
 use clap::{CommandFactory as _, Parser};
 use std::path::PathBuf;

@@ -1,5 +1,6 @@
 use crate::model::{LE, ModuleInfo, ModuleSource, PathSplit, TensorInfo, TensorTy};
-use anyhow::{Error, Result};
+use crate::storage::Storage;
+use anyhow::{Error, Result, bail};
 use ggml_base::{GgmlTensorInfo, GgufFile, GgufValue};
 use serde_json::Value;
 use std::fs::File;
@@ -7,34 +8,29 @@ use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 use weakref::Ref;
 
-pub struct Gguf<I> {
-    io: I,
+pub struct Gguf<S> {
+    storage: S,
     inner: GgufFile,
 }
 
-impl Gguf<File> {
-    pub fn open_file(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        let mut reader = BufReader::new(File::open(&path)?);
-        let inner = GgufFile::read(&mut reader)?;
-        let io = reader.into_inner();
-        Ok(Gguf { io, inner })
+impl<S: Storage> Gguf<S> {
+    pub fn open(mut storage: S) -> std::result::Result<Self, Error> {
+        let inner = GgufFile::read(storage.reader()?)?;
+        Ok(Gguf { storage, inner })
     }
-}
 
-impl<I: Read + Seek> Gguf<I> {
     fn tensor_bytes(&mut self, offset: u64, nbytes: usize) -> Result<Vec<u8>> {
-        self.io
-            .seek(std::io::SeekFrom::Start(offset + self.inner.data_start))?;
+        let mut r = self.storage.reader()?;
+        r.seek(std::io::SeekFrom::Start(offset + self.inner.data_start))?;
         let mut data = vec![0; nbytes];
-        self.io.read_exact(&mut data)?;
+        r.read_exact(&mut data)?;
         Ok(data)
     }
 }
 
-unsafe impl<I: Read + Seek> Send for Gguf<I> where I: Send {}
+unsafe impl<S: Storage> Send for Gguf<S> where S: Send {}
 
-impl<I: Read + Seek> ModuleSource for Gguf<I> {
+impl<S: Storage> ModuleSource for Gguf<S> {
     fn module(&mut self, split: &PathSplit) -> Result<ModuleInfo> {
         let tensors = &self.inner.tensors;
         Ok(ModuleInfo::build_from_tensors(
@@ -56,6 +52,10 @@ impl<I: Read + Seek> ModuleSource for Gguf<I> {
             map.insert(k.clone(), v.into());
         }
         Ok(map.into())
+    }
+
+    fn write_metadata(&mut self, metadata: Value) -> std::result::Result<(), Error> {
+        bail!("editing gguf files is not yet supported")
     }
 
     fn tensor_f32(

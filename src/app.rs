@@ -30,6 +30,7 @@ use crate::analysis::{Analysis, AnalysisCell, start_analysis_thread};
 use crate::gguf::Gguf;
 use crate::model::{Key, ModuleInfo, ModuleSource, PathSplit, shorten_value};
 use crate::safetensors::Safetensors;
+use crate::storage::FileStorage;
 
 pub trait TreeData: Send + Sync {
     type Id: Ord + Hash + Clone;
@@ -317,10 +318,11 @@ impl App {
 
     pub fn load_file(&mut self, file_path: PathBuf) -> Result<(), Error> {
         let ext = file_path.extension().and_then(|ext| ext.to_str());
+        let storage = FileStorage::new(file_path.clone());
         if ext == Some("safetensors") {
-            self.source = Some(Box::new(Safetensors::open_file(&file_path)?));
+            self.source = Some(Box::new(Safetensors::open(storage)?));
         } else if ext == Some("gguf") {
-            self.source = Some(Box::new(Gguf::open_file(&file_path)?));
+            self.source = Some(Box::new(Gguf::open(storage)?));
         } else {
             bail!("could not infer file type");
         }
