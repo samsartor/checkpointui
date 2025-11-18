@@ -257,23 +257,11 @@ pub trait ModuleSource {
     fn tensor_f64(&mut self, tensor: TensorInfo, cancel: Ref<()>) -> Result<Vec<f64>, Error>;
 }
 
-pub fn shorten_value(value: &mut Value) {
+pub fn shorten_value(value: &Value) -> bool {
     use Value::*;
     match value {
-        String(text) if text.len() > 10_000 || text.starts_with("data:image/") => {
-            *text = "...".to_string();
-        }
-        Array(values) => {
-            for value in values {
-                shorten_value(value);
-            }
-        }
-        Object(map) => {
-            for value in map.values_mut() {
-                shorten_value(value);
-            }
-        }
-        _ => (),
+        String(text) if text.len() > 10_000 || text.starts_with("data:image/") => return true,
+        _ => false,
     }
 }
 

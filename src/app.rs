@@ -168,7 +168,6 @@ pub struct App {
     meta_tree_state: Option<TreeState<Value>>,
     extra_metadata: Option<Value>,
     source: Option<Box<dyn ModuleSource + Send>>,
-    formatted_extra: String,
     count_formatter: Formatter,
     bytes_formatter: Formatter,
     selected_panel: Panel,
@@ -337,12 +336,6 @@ impl App {
         let mut module = data.module(&self.path_split)?;
         module.flatten_single_children();
         let mut extra_metadata = data.metadata()?;
-        shorten_value(&mut extra_metadata);
-        if let Ok(formatted) =
-            colored_json::to_colored_json(&extra_metadata, colored_json::ColorMode::On)
-        {
-            self.formatted_extra = formatted;
-        }
         self.extra_metadata = Some(extra_metadata);
         let mut state = TreeState::new(Arc::new(module).into());
         state.rebuild_visible_items();
@@ -740,9 +733,25 @@ impl App {
                     spans.push(name_span);
 
                     // Value (for leaf nodes)
-                    if !item.has_children() {
-                        let value_text = format!(" = {:?}", &*item.info);
-                        spans.push(value_text.fg(Color::Gray));
+                    if shorten_value(&*item.info) {
+                        spans.push(format!(" = ...").fg(Color::Gray));
+                    } else {
+                        match &*item.info {
+                            Value::Null => {
+                                spans.push(format!(" = null").fg(Color::Gray));
+                            }
+                            Value::Bool(bool) => {
+                                spans.push(format!(" = {bool}").fg(Color::Blue));
+                            }
+                            Value::Number(number) => {
+                                spans.push(format!(" = {number}").fg(Color::Blue));
+                            }
+                            Value::String(string) => {
+                                spans.push(format!(" = {string}").fg(Color::White));
+                            }
+                            Value::Array(_) => {}
+                            Value::Object(_) => {}
+                        }
                     }
 
                     Line::from(spans)
