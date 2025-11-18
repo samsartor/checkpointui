@@ -54,7 +54,7 @@ impl<S: Storage> ModuleSource for Gguf<S> {
         Ok(map.into())
     }
 
-    fn write_metadata(&mut self, metadata: Value) -> std::result::Result<(), Error> {
+    fn write_metadata(&mut self, metadata: &Value) -> std::result::Result<(), Error> {
         bail!("editing gguf files is not yet supported")
     }
 

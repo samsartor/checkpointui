@@ -166,7 +166,6 @@ pub struct App {
     file_path: Option<PathBuf>,
     tree_state: Option<TreeState<ModuleInfo>>,
     meta_tree_state: Option<TreeState<Value>>,
-    extra_metadata: Option<Value>,
     source: Option<Box<dyn ModuleSource + Send>>,
     count_formatter: Formatter,
     bytes_formatter: Formatter,
@@ -335,18 +334,15 @@ impl App {
         };
         let mut module = data.module(&self.path_split)?;
         module.flatten_single_children();
-        let mut extra_metadata = data.metadata()?;
-        self.extra_metadata = Some(extra_metadata);
         let mut state = TreeState::new(Arc::new(module).into());
         state.rebuild_visible_items();
         self.tree_state = Some(state);
 
         // Create metadata tree state
-        if let Some(metadata) = &self.extra_metadata {
-            let mut meta_state = TreeState::new(Arc::new(metadata.clone()).into());
-            meta_state.rebuild_visible_items();
-            self.meta_tree_state = Some(meta_state);
-        }
+        let extra_metadata = data.metadata()?;
+        let mut meta_state = TreeState::new(Arc::new(extra_metadata).into());
+        meta_state.rebuild_visible_items();
+        self.meta_tree_state = Some(meta_state);
 
         // Now that we have the tree, move the source to the analysis thread
         let source = self.source.take().unwrap();
@@ -1045,6 +1041,56 @@ impl App {
             }
         }
     }
+
+    fn update_selected_metadata(&mut self, new_value: Option<Value>) {
+        let Some(source) = &mut self.source else {
+            return;
+        };
+        let Some(state) = &mut self.meta_tree_state else {
+            return;
+        };
+        let Some(index) = state.list_state.borrow().selected() else {
+            return;
+        };
+        let Some(item) = state.visible_items.get(index) else {
+            return;
+        };
+        let root = &*state.data;
+        let replace = &*item.info;
+        let new_meta = clone_with_replacement(root, replace, new_value.as_ref()).unwrap();
+        match source
+            .write_metadata(&new_meta)
+            .and_then(|_| source.metadata())
+        {
+            Err(err) => {
+                // TODO: display error
+            }
+            Ok(reloaded_meta) => {
+                *state = TreeState::new(Arc::new(reloaded_meta).into());
+                state.rebuild_visible_items();
+            }
+        }
+    }
+}
+
+fn clone_with_replacement(value: &Value, replace: &Value, with: Option<&Value>) -> Option<Value> {
+    if (value as *const Value) == (replace as *const Value) {
+        return with.cloned();
+    }
+    Some(match value {
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .filter_map(|i| clone_with_replacement(i, replace, with))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter_map(|(k, v)| Some((k.clone(), clone_with_replacement(v, replace, with)?)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    })
 }
 
 pub fn setup_terminal() -> Result<Terminal<Backend>, Error> {

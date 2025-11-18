@@ -90,7 +90,7 @@ impl<S: Storage> ModuleSource for Safetensors<S> {
         Ok(map.into())
     }
 
-    fn write_metadata(&mut self, metadata: Value) -> std::result::Result<(), Error> {
+    fn write_metadata(&mut self, metadata: &Value) -> std::result::Result<(), Error> {
         let mut new_metadata = HashMap::new();
         flatten_value("".into(), &metadata, &mut new_metadata);
         let mut tensors: Vec<_> = self

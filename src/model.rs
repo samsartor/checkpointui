@@ -252,7 +252,7 @@ impl ModuleInfo {
 pub trait ModuleSource {
     fn module(&mut self, split: &PathSplit) -> Result<ModuleInfo, Error>;
     fn metadata(&mut self) -> Result<Value, Error>;
-    fn write_metadata(&mut self, metadata: Value) -> Result<(), Error>;
+    fn write_metadata(&mut self, metadata: &Value) -> Result<(), Error>;
     fn tensor_f32(&mut self, tensor: TensorInfo, cancel: Ref<()>) -> Result<Vec<f32>, Error>;
     fn tensor_f64(&mut self, tensor: TensorInfo, cancel: Ref<()>) -> Result<Vec<f64>, Error>;
 }
