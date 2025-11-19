@@ -130,6 +130,7 @@ enum Panel {
 enum DialogType {
     Edit,
     Delete,
+    Error(String),
 }
 
 impl Panel {
@@ -384,16 +385,20 @@ impl App {
                         match dialog_type {
                             DialogType::Edit => {
                                 // Parse the edit_draft and update metadata
-                                let new_value = self.parse_edit_draft();
-                                self.update_selected_metadata(Some(new_value));
                                 self.dialog_type = None;
+                                let new_value = self.parse_edit_draft();
                                 self.edit_draft.clear();
+                                self.update_selected_metadata(Some(new_value));
                             }
                             DialogType::Delete => {
                                 // Delete the metadata
-                                self.update_selected_metadata(None);
                                 self.dialog_type = None;
                                 self.edit_draft.clear();
+                                self.update_selected_metadata(None);
+                            }
+                            DialogType::Error(_) => {
+                                // Close error dialog
+                                self.dialog_type = None;
                             }
                         }
                     }
@@ -1133,12 +1138,10 @@ impl App {
         let new_meta = clone_with_replacement(root, replace, new_value.as_ref()).unwrap();
 
         let mut data = source.lock().unwrap();
-        match data
-            .write_metadata(&new_meta)
-            .and_then(|_| data.metadata())
-        {
-            Err(_err) => {
-                // TODO: display error
+        match data.write_metadata(&new_meta).and_then(|_| data.metadata()) {
+            Err(err) => {
+                // Display error dialog
+                self.dialog_type = Some(DialogType::Error(err.to_string()));
             }
             Ok(reloaded_meta) => {
                 *state = TreeState::new(Arc::new(reloaded_meta).into());
@@ -1227,7 +1230,7 @@ impl App {
 
         // Create dialog content
         let mut text = Text::default();
-        match dialog_type {
+        let (title, border_color) = match dialog_type {
             DialogType::Edit => {
                 text.push_line("Edit Value".bold().fg(Color::Yellow));
                 text.push_line("");
@@ -1237,6 +1240,7 @@ impl App {
                 ]);
                 text.push_line("");
                 text.push_line("Enter: Confirm | Esc: Cancel".fg(Color::Gray));
+                ("Metadata Editor", Color::Yellow)
             }
             DialogType::Delete => {
                 text.push_line("Delete Value".bold().fg(Color::Red));
@@ -1244,15 +1248,24 @@ impl App {
                 text.push_line("Are you sure you want to delete this value?".fg(Color::White));
                 text.push_line("");
                 text.push_line("Enter: Confirm | Esc: Cancel".fg(Color::Gray));
+                ("Metadata Editor", Color::Yellow)
             }
-        }
+            DialogType::Error(err) => {
+                text.push_line("Error".bold().fg(Color::Red));
+                text.push_line("");
+                text.push_line(err.clone().fg(Color::White));
+                text.push_line("");
+                text.push_line("Enter/Esc: Close".fg(Color::Gray));
+                ("Error", Color::Red)
+            }
+        };
 
         let dialog = Paragraph::new(text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow))
-                    .title("Metadata Editor"),
+                    .border_style(Style::default().fg(border_color))
+                    .title(title),
             )
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false });
