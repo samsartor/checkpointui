@@ -1,9 +1,9 @@
 mod analysis;
 mod app;
-mod gguf;
-mod model;
-mod safetensors;
-mod storage;
+pub mod gguf;
+pub mod model;
+pub mod safetensors;
+pub mod storage;
 
 use clap::{CommandFactory as _, Parser};
 use std::path::PathBuf;

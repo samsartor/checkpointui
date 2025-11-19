@@ -3,9 +3,7 @@ use crate::storage::Storage;
 use anyhow::{Error, Result, bail};
 use ggml_base::{GgmlTensorInfo, GgufFile, GgufValue};
 use serde_json::Value;
-use std::fs::File;
-use std::io::{BufReader, Read, Seek};
-use std::path::Path;
+use std::io::{Read, Seek};
 use weakref::Ref;
 
 pub struct Gguf<S> {
@@ -20,7 +18,7 @@ impl<S: Storage> Gguf<S> {
     }
 
     fn tensor_bytes(&mut self, offset: u64, nbytes: usize) -> Result<Vec<u8>> {
-        let mut r = self.storage.reader()?;
+        let r = self.storage.reader()?;
         r.seek(std::io::SeekFrom::Start(offset + self.inner.data_start))?;
         let mut data = vec![0; nbytes];
         r.read_exact(&mut data)?;
@@ -54,7 +52,7 @@ impl<S: Storage> ModuleSource for Gguf<S> {
         Ok(map.into())
     }
 
-    fn write_metadata(&mut self, metadata: &Value) -> std::result::Result<(), Error> {
+    fn write_metadata(&mut self, _metadata: &Value) -> std::result::Result<(), Error> {
         bail!("editing gguf files is not yet supported")
     }
 

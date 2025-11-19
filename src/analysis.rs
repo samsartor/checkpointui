@@ -248,7 +248,7 @@ fn do_analysis(source: &Mutex<dyn ModuleSource>, request: Ref<Analysis>) -> Resu
 
 pub type AnalysisCell = AsyncCell<Ref<Analysis>>;
 
-pub fn run_analysis_loop(mut source: Arc<Mutex<dyn ModuleSource>>, requests: Ref<AnalysisCell>) {
+pub fn run_analysis_loop(source: Arc<Mutex<dyn ModuleSource>>, requests: Ref<AnalysisCell>) {
     loop {
         let Some(request) = block_on(TakeRef(requests)) else {
             return;

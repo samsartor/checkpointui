@@ -4,10 +4,7 @@ use anyhow::{Error, Result, bail};
 use safetensors::{SafeTensorError, tensor::Metadata};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::{Read, Seek};
-use std::mem::size_of;
-use std::path::Path;
 use weakref::Ref;
 
 pub struct Safetensors<S> {
@@ -29,7 +26,7 @@ impl<S: Storage> Safetensors<S> {
     }
 
     fn tensor_bytes(&mut self, start: u64, nbytes: usize) -> Result<Vec<u8>> {
-        let mut r = self.storage.reader()?;
+        let r = self.storage.reader()?;
         r.seek(std::io::SeekFrom::Start(start + self.data_offset))?;
         let mut data = vec![0; nbytes];
         r.read_exact(&mut data)?;

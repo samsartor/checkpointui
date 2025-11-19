@@ -6,8 +6,6 @@ use std::sync::Arc;
 use std::{cmp, fmt, hash, mem, ops};
 use weakref::Ref;
 
-use crate::storage::Storage;
-
 #[derive(Debug, Clone)]
 #[allow(non_camel_case_types)]
 pub enum TensorTy {
